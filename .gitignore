@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# Executables
+*.exe
+*.msi
+
+# Temporary folders
+scratch/
+restore_point/
+backup_split_screen/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Large binary assets (optional, but recommended for git)
+# *.glb
+# *.fbx
+# *.zip
+# *.mp3
+# *.mpeg
