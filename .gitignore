@@ -2,7 +2,7 @@
 node_modules/
 package-lock.json
 
-# Executables
+# Executables & binaries
 *.exe
 *.msi
 
@@ -15,9 +15,17 @@ backup_split_screen/
 .DS_Store
 Thumbs.db
 
-# Large binary assets (optional, but recommended for git)
-# *.glb
-# *.fbx
-# *.zip
-# *.mp3
-# *.mpeg
+# Large binary assets (3D models, textures, audio)
+*.glb
+*.fbx
+*.zip
+*.mp3
+*.mpeg
+*.wav
+*.ogg
+
+# Downloaded assets
+downloaded_assets/
+
+# Cloudflared binary
+cloudflared*
