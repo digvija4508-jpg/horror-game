@@ -202,7 +202,7 @@ export function handleSocketMessage(data) {
 }
 
 // --- 5. Update Stamina & Horror Audio State ---
-export function updateAudio(deltaTime, isMoving, wantsToSprint, isGrounded, panicIntensity, otherPlayers, playerEnergy) {
+export function updateAudio(deltaTime, isMoving, wantsToSprint, isGrounded, panicIntensity, otherPlayers) {
     if (!soundObjects.ambient) return false;
 
     // Pause all audio if the pause menu is open

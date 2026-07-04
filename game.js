@@ -1482,7 +1482,7 @@ function updatePlayerMovement(deltaTime) {
             playerGroup.position.addScaledVector(flyDir, speed * deltaTime);
         }
 
-        updateAudio(deltaTime, false, false, false, panicIntensity, otherPlayers, playerEnergy);
+        updateAudio(deltaTime, false, false, false, panicIntensity, otherPlayers);
         return;
     }
 
