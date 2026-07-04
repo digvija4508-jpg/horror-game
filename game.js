@@ -25,7 +25,7 @@ const CONFIG = {
     raycastHeightOffset: 0.30, // Elevated to support high step climbs
     stepLimit: 0.22,           // Generous climb limit to walk up sloped leaves and grass smoothly
     playerHeight: 0.07,        // Scale player to 7cm
-    fogDensity: 4.5,           // Balanced fog density for playable visible distance at night
+    fogDensity: 2.5,           // Balanced fog density for playable visible distance at night
     ambientLightIntensity: 0.12 // Playable midnight ambient level (can see outlines of grass)
 };
 
@@ -599,9 +599,9 @@ function animateRemoteAvatar(player, deltaTime) {
 function init() {
     // 1. Scene Setup
     scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x000000); // Pitch black night
+    scene.background = new THREE.Color(0x060c14); // Misty dark night
     // Add Exp2 Fog for a dark horror night
-    scene.fog = new THREE.FogExp2(0x000000, CONFIG.fogDensity); // Playable dark fog
+    scene.fog = new THREE.FogExp2(0x060c14, CONFIG.fogDensity); // Playable dark fog
 
     // 2. Camera Setup
     // FPV Camera
@@ -2074,8 +2074,8 @@ function updateTimeOfDay() {
             sunLight.visible = true;
         }
     } else {
-        scene.background = new THREE.Color(0x000000);
-        scene.fog.color = new THREE.Color(0x000000);
+        scene.background = new THREE.Color(0x060c14);
+        scene.fog.color = new THREE.Color(0x060c14);
         scene.fog.density = CONFIG.fogDensity;
 
         scene.traverse(child => {
