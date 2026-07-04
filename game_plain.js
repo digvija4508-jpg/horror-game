@@ -898,11 +898,12 @@ function updatePlayerAnimations(deltaTime) {
         // Left arm swings opposite to left leg
         bones.lShoulder.rotation.x = -swing * 0.5 + 0.2;
         bones.lElbow.rotation.x = -0.3 - Math.abs(swing) * 0.3;
+        bones.lHand.rotation.set(0, Math.sin(walkCycle) * 0.2, 0.1); // Natural hand movement
 
         // Right arm (flashlight arm) remains pointing forward, bobbing slightly with look pitch
         bones.rShoulder.rotation.x = -1.4 + pitch + swingDouble * 0.05;
         bones.rForearm.rotation.x = -0.9 + swingDouble * 0.02;
-        bones.rHand.rotation.x = 0.2;
+        bones.rHand.rotation.set(0.15 + Math.sin(walkCycle) * 0.1, -0.25 + Math.sin(walkCycle * 0.5) * 0.05, Math.sin(walkCycle) * 0.05); // Natural hand movement
     } else {
         // Idle Pose: gentle breathing animation
         const breathe = Math.sin(time * 2);
@@ -914,11 +915,12 @@ function updatePlayerAnimations(deltaTime) {
         // Arm breathing
         bones.lShoulder.rotation.set(0.1 + breathe * 0.05, 0, 0.15);
         bones.lElbow.rotation.set(-0.2 + breathe * 0.03, 0, 0);
+        bones.lHand.rotation.set(0, breathe * 0.1, 0.1);
         
         // Flashlight arm stable pointing forward
         bones.rShoulder.rotation.set(-1.4 + pitch + breathe * 0.02, -0.25, 0.3);
         bones.rForearm.rotation.set(-0.9, -0.2, 0);
-        bones.rHand.rotation.set(0.2, -0.4, 0);
+        bones.rHand.rotation.set(0.15 + breathe * 0.1, -0.25 + breathe * 0.05, breathe * 0.05); // Natural hand movement
 
         bones.spine.rotation.x = breathe * 0.03;
     }

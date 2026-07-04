@@ -34,8 +34,19 @@ let clock = new THREE.Clock();
 
 // Game entities
 let mapModel = null;
-let playerModel = null; // Simple cylinder mesh
+let playerModel = null; // Root mesh group of the procedural avatar
 let playerGroup = null; // Group holding the player mesh for easier rotation/positioning
+
+// --- Procedural Stickman Avatar State ---
+let bodyParts = {};
+let animState = 'idle';
+let animTimer = 0;
+let landTimer = 0;
+let prevVertVel = 0;
+let torsoTwist = 0;
+let prevYaw = 0;
+let turnLean = 0;
+let walkTime = 0;
 let collidableMeshes = [];
 
 // Smooth Mouse Look Rotation (Yaw & Pitch)
@@ -56,6 +67,10 @@ let panicIntensity = 0; // Horror tension factor when red eyes are near
 
 // Creepy Red Eyes state
 let redEyesList = [];
+
+let moonSprite = null;
+const tempCameraWorldPos = new THREE.Vector3();
+const moonOffset = new THREE.Vector3(0, 8, -10).normalize().multiplyScalar(80);
 
 // Deterministic insect and firefly particles
 let fireflies = [];
@@ -140,6 +155,446 @@ const startButton = document.getElementById('start-button');
 const gameHud = document.getElementById('game-hud');
 const resetButton = document.getElementById('reset-button');
 
+// --- Procedural Stickman Avatar Helper Functions ---
+const WHITE = 0xffffff;
+const L = THREE.MathUtils.lerp;
+
+function capsule(rx, ry, color, roughness = 0.65) {
+    const m = new THREE.Mesh(
+        new THREE.CapsuleGeometry(rx, ry, 12, 24),
+        new THREE.MeshStandardMaterial({ color, roughness })
+    );
+    m.castShadow = true;
+    return m;
+}
+function sphere(r, color, roughness = 0.6) {
+    const m = new THREE.Mesh(
+        new THREE.SphereGeometry(r, 20, 16),
+        new THREE.MeshStandardMaterial({ color, roughness })
+    );
+    m.castShadow = true;
+    return m;
+}
+function box(w, h, d, color) {
+    const m = new THREE.Mesh(
+        new THREE.BoxGeometry(w, h, d),
+        new THREE.MeshStandardMaterial({ color, roughness: 0.8 })
+    );
+    m.castShadow = true;
+    return m;
+}
+
+function makeJoint(radius) {
+    const group = new THREE.Group();
+    const mesh = sphere(radius, WHITE, 0.8);
+    group.add(mesh);
+    return group;
+}
+
+// --- Build Procedural Stickman Avatar ---
+function buildProceduralAvatar(parentGroup, storeParts) {
+    const root = new THREE.Group();
+    const bp = {};
+
+    function makeLeg(side) {
+        const sign = side === 'l' ? -1 : 1;
+        const hipX = sign * 0.14;
+        const hipPivot = new THREE.Group();
+        hipPivot.position.set(hipX, 0.88, 0);
+        root.add(hipPivot);
+
+        const thigh = capsule(0.12, 0.32, WHITE);
+        thigh.position.y = -0.32;
+        hipPivot.add(thigh);
+
+        const kneePivot = new THREE.Group();
+        kneePivot.position.y = -0.64;
+        hipPivot.add(kneePivot);
+
+        const kneeFill = sphere(0.10, WHITE);
+        kneePivot.add(kneeFill);
+
+        const shin = capsule(0.10, 0.30, WHITE);
+        shin.position.y = -0.30;
+        kneePivot.add(shin);
+
+        const anklePivot = new THREE.Group();
+        anklePivot.position.y = -0.58;
+        kneePivot.add(anklePivot);
+
+        const foot = box(0.14, 0.10, 0.26, WHITE);
+        foot.position.set(0, -0.04, 0.05);
+        anklePivot.add(foot);
+
+        return { hipPivot, kneePivot, anklePivot };
+    }
+
+    const lLeg = makeLeg('l');
+    const rLeg = makeLeg('r');
+    bp.lHipPivot = lLeg.hipPivot;
+    bp.lKneePivot = lLeg.kneePivot;
+    bp.lAnklePivot = lLeg.anklePivot;
+    bp.rHipPivot = rLeg.hipPivot;
+    bp.rKneePivot = rLeg.kneePivot;
+    bp.rAnklePivot = rLeg.anklePivot;
+
+    const pelvis = capsule(0.26, 0.18, WHITE, 0.8);
+    pelvis.position.y = 0.96;
+    root.add(pelvis);
+    bp.pelvis = pelvis;
+
+    const torsoGroup = new THREE.Group();
+    torsoGroup.position.y = 1.10;
+    root.add(torsoGroup);
+    bp.torsoGroup = torsoGroup;
+
+    const chest = capsule(0.26, 0.38, WHITE);
+    torsoGroup.add(chest);
+    bp.chest = chest;
+
+    const neckFill = sphere(0.10, WHITE);
+    neckFill.position.y = 0.46;
+    torsoGroup.add(neckFill);
+
+    const neck = capsule(0.08, 0.10, WHITE, 0.5);
+    neck.position.y = 0.52;
+    torsoGroup.add(neck);
+
+    const headGroup = new THREE.Group();
+    headGroup.position.y = 0.68;
+    torsoGroup.add(headGroup);
+    bp.headGroup = headGroup;
+
+    const headMesh = sphere(0.22, WHITE, 0.45);
+    headGroup.add(headMesh);
+
+    function makeArm(side) {
+        const sign = side === 'l' ? -1 : 1;
+        const shX = sign * 0.32;
+        const shoulderPivot = new THREE.Group();
+        shoulderPivot.position.set(shX, 0.30, 0);
+        torsoGroup.add(shoulderPivot);
+
+        const shFill = sphere(0.12, WHITE);
+        shoulderPivot.add(shFill);
+
+        const upperArm = capsule(0.09, 0.24, WHITE);
+        upperArm.position.y = -0.26;
+        shoulderPivot.add(upperArm);
+
+        const elbowPivot = new THREE.Group();
+        elbowPivot.position.y = -0.52;
+        shoulderPivot.add(elbowPivot);
+
+        const elbowFill = sphere(0.08, WHITE);
+        elbowPivot.add(elbowFill);
+
+        const forearm = capsule(0.08, 0.22, WHITE, 0.55);
+        forearm.position.y = -0.24;
+        elbowPivot.add(forearm);
+
+        const wristPivot = new THREE.Group();
+        wristPivot.position.y = -0.46;
+        elbowPivot.add(wristPivot);
+
+        const hand = sphere(0.07, WHITE, 0.5);
+        wristPivot.add(hand);
+
+        return { shoulderPivot, elbowPivot, wristPivot, forearm, hand };
+    }
+
+    const lArm = makeArm('l');
+    const rArm = makeArm('r');
+    bp.lShoulderPivot = lArm.shoulderPivot;
+    bp.lElbowPivot = lArm.elbowPivot;
+    bp.rShoulderPivot = rArm.shoulderPivot;
+    bp.rElbowPivot = rArm.elbowPivot;
+    bp.lForearm = lArm.forearm;
+    bp.lHand = lArm.hand;
+    bp.rForearm = rArm.forearm;
+    bp.rHand = rArm.hand;
+    bp.lWristPivot = lArm.wristPivot;
+    bp.rWristPivot = rArm.wristPivot;
+
+    // Scale to playerHeight and offset feet
+    const bbox = new THREE.Box3().setFromObject(root);
+    const bsize = new THREE.Vector3();
+    bbox.getSize(bsize);
+    if (bsize.y > 0) {
+        const scale = CONFIG.playerHeight / bsize.y;
+        root.scale.setScalar(scale);
+    }
+    const bbox2 = new THREE.Box3().setFromObject(root);
+    root.position.y = -bbox2.min.y;
+
+    parentGroup.add(root);
+
+    if (storeParts) {
+        Object.assign(bodyParts, bp);
+        playerModel = root;
+    }
+    return { root, bodyParts: bp };
+}
+
+// --- IK Setters ---
+function setLeg(hipPivot, kneePivot, anklePivot, hipX, kneeX, ankleX, speed = 0.14) {
+    hipPivot.rotation.x = L(hipPivot.rotation.x, hipX, speed);
+    kneePivot.rotation.x = L(kneePivot.rotation.x, kneeX, speed);
+    anklePivot.rotation.x = L(anklePivot.rotation.x, ankleX, speed);
+}
+function setArm(shoulderPivot, elbowPivot, shX, shZ, elX, speed = 0.14) {
+    shoulderPivot.rotation.x = L(shoulderPivot.rotation.x, shX, speed);
+    shoulderPivot.rotation.z = L(shoulderPivot.rotation.z, shZ, speed);
+    elbowPivot.rotation.x = L(elbowPivot.rotation.x, elX, speed);
+}
+
+// --- Stickman Animation State Machine ---
+function animateCharacter(deltaTime, isMoving) {
+    if (!bodyParts.lHipPivot) return;
+    const bp = bodyParts;
+    const grounded = playerGroup.position.y <= 0.01;
+    const rising = verticalVelocity > 0.5;
+    const falling = verticalVelocity < -1.0 && !grounded;
+    const yawDelta = yaw - prevYaw;
+    const turnSpeed = Math.abs(yawDelta) / deltaTime;
+
+    if (!grounded && rising) animState = 'jump';
+    else if (!grounded && falling) animState = 'fall';
+    else if (landTimer > 0) animState = 'land';
+    else if (isMoving && !localIsSprintingActive) animState = 'walk';
+    else if (isMoving && localIsSprintingActive) animState = 'sprint';
+    else animState = 'idle';
+
+    if (landTimer > 0) landTimer -= deltaTime;
+    if (grounded && prevVertVel < -3.0) { landTimer = 0.35; animState = 'land'; }
+    animTimer += deltaTime;
+
+    const targetLean = THREE.MathUtils.clamp(-yawDelta * 18, -0.25, 0.25);
+    turnLean = L(turnLean, targetLean, 0.18);
+    if (bp.torsoGroup) bp.torsoGroup.rotation.z = turnLean;
+
+    const TB = 1.10;
+    const torchEquipped = selectedSlot === 1;
+
+    if (animState === 'idle') {
+        walkTime += deltaTime * 1.4;
+        const breath = Math.sin(walkTime * 0.85) * 0.012;
+        const sway = Math.sin(walkTime * 0.6) * 0.018;
+        if (bp.torsoGroup) { bp.torsoGroup.position.y = L(bp.torsoGroup.position.y, TB + breath, 0.08); bp.torsoGroup.rotation.x = L(bp.torsoGroup.rotation.x, 0.02, 0.05); }
+        if (bp.headGroup) bp.headGroup.rotation.x = L(bp.headGroup.rotation.x, -sway * 0.3, 0.06);
+        setArm(bp.lShoulderPivot, bp.lElbowPivot, 0.05, -0.08 + sway, 0.12, 0.06);
+        if (!torchEquipped) setArm(bp.rShoulderPivot, bp.rElbowPivot, 0.05, 0.08 - sway, 0.12, 0.06);
+        setLeg(bp.lHipPivot, bp.lKneePivot, bp.lAnklePivot, 0, 0, 0, 0.08);
+        setLeg(bp.rHipPivot, bp.rKneePivot, bp.rAnklePivot, 0, 0, 0, 0.08);
+    } else if (animState === 'walk') {
+        walkTime += deltaTime * 7.5;
+        const t = walkTime;
+        const bob = Math.abs(Math.sin(t)) * 0.03;
+        if (bp.torsoGroup) { bp.torsoGroup.position.y = L(bp.torsoGroup.position.y, TB - bob * 0.5, 0.15); bp.torsoGroup.rotation.x = L(bp.torsoGroup.rotation.x, 0.06, 0.08); }
+        const lHipAngle = Math.sin(t) * 0.7;
+        const rHipAngle = Math.sin(t + Math.PI) * 0.7;
+        const lKneeAngle = Math.max(0, -Math.sin(t)) * 0.9;
+        const rKneeAngle = Math.max(0, -Math.sin(t + Math.PI)) * 0.9;
+        const lAnkle = Math.sin(t) * 0.25;
+        const rAnkle = Math.sin(t + Math.PI) * 0.25;
+        setLeg(bp.lHipPivot, bp.lKneePivot, bp.lAnklePivot, lHipAngle, lKneeAngle, lAnkle, 0.25);
+        setLeg(bp.rHipPivot, bp.rKneePivot, bp.rAnklePivot, rHipAngle, rKneeAngle, rAnkle, 0.25);
+        setArm(bp.lShoulderPivot, bp.lElbowPivot, -Math.sin(t) * 0.5, -0.08, 0.6, 0.25);
+        if (!torchEquipped) setArm(bp.rShoulderPivot, bp.rElbowPivot, -Math.sin(t + Math.PI) * 0.5, 0.08, 0.6, 0.25);
+        if (bp.headGroup) bp.headGroup.position.y = L(bp.headGroup.position.y, 0.68 + bob, 0.2);
+    } else if (animState === 'sprint') {
+        walkTime += deltaTime * 12.0;
+        const t = walkTime;
+        const bob = Math.abs(Math.sin(t * 2)) * 0.05;
+        if (bp.torsoGroup) { bp.torsoGroup.position.y = L(bp.torsoGroup.position.y, TB - bob * 0.8, 0.2); bp.torsoGroup.rotation.x = L(bp.torsoGroup.rotation.x, 0.12, 0.15); }
+        const lHipAngle = Math.sin(t * 1.5) * 1.0;
+        const rHipAngle = Math.sin(t * 1.5 + Math.PI) * 1.0;
+        const lKneeAngle = Math.max(0, -Math.sin(t * 1.5)) * 1.3;
+        const rKneeAngle = Math.max(0, -Math.sin(t * 1.5 + Math.PI)) * 1.3;
+        const lAnkle = Math.sin(t * 1.5) * 0.4;
+        const rAnkle = Math.sin(t * 1.5 + Math.PI) * 0.4;
+        setLeg(bp.lHipPivot, bp.lKneePivot, bp.lAnklePivot, lHipAngle, lKneeAngle, lAnkle, 0.35);
+        setLeg(bp.rHipPivot, bp.rKneePivot, bp.rAnklePivot, rHipAngle, rKneeAngle, rAnkle, 0.35);
+        setArm(bp.lShoulderPivot, bp.lElbowPivot, -Math.sin(t * 1.5) * 0.8, -0.15, 1.0, 0.5);
+        if (!torchEquipped) setArm(bp.rShoulderPivot, bp.rElbowPivot, -Math.sin(t * 1.5 + Math.PI) * 0.8, 0.15, 1.0, 0.5);
+        if (bp.headGroup) bp.headGroup.position.y = L(bp.headGroup.position.y, 0.68 + bob, 0.3);
+    } else if (animState === 'jump') {
+        if (bp.torsoGroup) { bp.torsoGroup.position.y = L(bp.torsoGroup.position.y, 1.18, 0.15); bp.torsoGroup.rotation.x = L(bp.torsoGroup.rotation.x, -0.15, 0.12); }
+        setArm(bp.lShoulderPivot, bp.lElbowPivot, -1.2, -0.15, -0.4, 0.18);
+        if (!torchEquipped) setArm(bp.rShoulderPivot, bp.rElbowPivot, -1.2, 0.15, -0.4, 0.18);
+        setLeg(bp.lHipPivot, bp.lKneePivot, bp.lAnklePivot, -0.5, 1.1, -0.3, 0.18);
+        setLeg(bp.rHipPivot, bp.rKneePivot, bp.rAnklePivot, -0.5, 1.1, -0.3, 0.18);
+    } else if (animState === 'fall') {
+        if (bp.torsoGroup) bp.torsoGroup.rotation.x = L(bp.torsoGroup.rotation.x, 0.25, 0.08);
+        setArm(bp.lShoulderPivot, bp.lElbowPivot, 0.2, -1.2, 0.3, 0.10);
+        if (!torchEquipped) setArm(bp.rShoulderPivot, bp.rElbowPivot, 0.2, 1.2, 0.3, 0.10);
+        setLeg(bp.lHipPivot, bp.lKneePivot, bp.lAnklePivot, 0.2, 0.5, 0, 0.10);
+        setLeg(bp.rHipPivot, bp.rKneePivot, bp.rAnklePivot, 0.2, 0.5, 0, 0.10);
+    } else if (animState === 'land') {
+        const t = 1.0 - (landTimer / 0.35);
+        const squat = Math.sin(t * Math.PI) * 0.18;
+        if (bp.torsoGroup) { bp.torsoGroup.position.y = L(bp.torsoGroup.position.y, TB - squat * 0.5, 0.4); bp.torsoGroup.rotation.x = L(bp.torsoGroup.rotation.x, squat * 0.5, 0.3); }
+        setArm(bp.lShoulderPivot, bp.lElbowPivot, 0.4, -0.15, 0.5, 0.3);
+        if (!torchEquipped) setArm(bp.rShoulderPivot, bp.rElbowPivot, 0.4, 0.15, 0.5, 0.3);
+        setLeg(bp.lHipPivot, bp.lKneePivot, bp.lAnklePivot, 0.5, 0.9, -0.2, 0.3);
+        setLeg(bp.rHipPivot, bp.rKneePivot, bp.rAnklePivot, 0.5, 0.9, -0.2, 0.3);
+    }
+
+    // When torch equipped, hold right arm forward toward camera (torch is held in front) using dynamic 3D IK
+    if (torchEquipped && animState !== 'sprint' && torchMesh) {
+        // Group the hand directly to the torch to ensure 100% zero-gap alignment
+        if (bp.rHand && bp.rHand.parent !== torchMesh) {
+            torchMesh.add(bp.rHand);
+            // Position hand exactly on the flashlight handle
+            bp.rHand.position.set(0.0, 0.0, -0.001);
+            bp.rHand.rotation.set(0.0, 0.0, 0.1); // Natural hand orientation
+            bp.rHand.scale.set(0.035, 0.035, 0.035); // Matches character scale
+        }
+
+        // Ensure world matrices are fully updated so world positions are accurate
+        if (bp.torsoGroup) bp.torsoGroup.updateMatrixWorld(true);
+        if (camera) camera.updateMatrixWorld(true);
+        torchMesh.updateMatrixWorld(true);
+        if (bp.rHand) bp.rHand.updateMatrixWorld(true);
+
+        const L1 = 0.52; // Upper arm length
+        const L2 = 0.46; // Forearm length
+        const handWorldPos = new THREE.Vector3();
+        if (bp.rHand) {
+            bp.rHand.getWorldPosition(handWorldPos);
+        } else {
+            torchMesh.getWorldPosition(handWorldPos);
+        }
+
+        // Map world position of hand to torso coordinate space
+        const targetLocal = bp.torsoGroup.worldToLocal(handWorldPos.clone());
+        const v = new THREE.Vector3().subVectors(targetLocal, bp.rShoulderPivot.position);
+        const d = THREE.MathUtils.clamp(v.length(), 0.06, L1 + L2);
+
+        const dir = v.clone().normalize();
+        // positive rotation X rotates towards negative Z (forward)
+        const theta_x = Math.asin(THREE.MathUtils.clamp(-dir.z, -1, 1));
+        const theta_z = Math.atan2(dir.x, -dir.y);
+
+        // Law of Cosines for elbow angle
+        const cosElbow = (d * d - L1 * L1 - L2 * L2) / (2 * L1 * L2);
+        const elbowAngle = Math.acos(THREE.MathUtils.clamp(cosElbow, -1, 1));
+
+        // Angle offset for upper arm to reach target with bent elbow
+        const cosAlpha = (L1 * L1 + d * d - L2 * L2) / (2 * L1 * d);
+        const alpha = Math.acos(THREE.MathUtils.clamp(cosAlpha, -1, 1));
+
+        const shX = theta_x - alpha;
+        const shZ = theta_z;
+        const elX = elbowAngle;
+
+        bp.rShoulderPivot.rotation.x = shX;
+        bp.rShoulderPivot.rotation.z = shZ;
+        bp.rElbowPivot.rotation.x = elX;
+    } else {
+        // If not holding torch or if sprinting, restore hand to its natural wrist parent
+        if (bp.rHand && bp.rHand.parent !== bp.rWristPivot) {
+            bp.rWristPivot.add(bp.rHand);
+            bp.rHand.position.set(0, 0, 0);
+            bp.rHand.rotation.set(0, 0, 0);
+            bp.rHand.scale.set(1, 1, 1);
+        }
+    }
+}
+
+// --- Remote Stickman Avatar Animation ---
+function animateRemoteAvatar(player, deltaTime) {
+    const bp = player.bodyParts;
+    if (!bp || !bp.lHipPivot) return;
+    const isMoving = player.mesh.position.distanceTo(player.targetPosition) > 0.001;
+    const yawDelta = player.targetYaw - player.prevYaw;
+    const twist = THREE.MathUtils.clamp(yawDelta * 15, -0.3, 0.3);
+    player.turnLean = L(player.turnLean || 0, -yawDelta * 18, 0.18);
+    player.prevYaw = player.targetYaw;
+
+    if (bp.torsoGroup) {
+        bp.torsoGroup.rotation.y = twist;
+        bp.torsoGroup.rotation.z = player.turnLean;
+    }
+
+    player.walkTime = (player.walkTime || 0) + deltaTime * (isMoving ? 7.5 : 1.4);
+    const t = player.walkTime;
+
+    if (isMoving) {
+        const bob = Math.abs(Math.sin(t)) * 0.03;
+        if (bp.torsoGroup) bp.torsoGroup.position.y = L(bp.torsoGroup.position.y, 1.10 - bob * 0.5, 0.15);
+        const lHip = Math.sin(t) * 0.7;
+        const rHip = Math.sin(t + Math.PI) * 0.7;
+        const lKnee = Math.max(0, -Math.sin(t)) * 0.9;
+        const rKnee = Math.max(0, -Math.sin(t + Math.PI)) * 0.9;
+        bp.lHipPivot.rotation.x = L(bp.lHipPivot.rotation.x, lHip, 0.25);
+        bp.lKneePivot.rotation.x = L(bp.lKneePivot.rotation.x, lKnee, 0.25);
+        bp.lAnklePivot.rotation.x = L(bp.lAnklePivot.rotation.x, Math.sin(t) * 0.25, 0.25);
+        bp.rHipPivot.rotation.x = L(bp.rHipPivot.rotation.x, rHip, 0.25);
+        bp.rKneePivot.rotation.x = L(bp.rKneePivot.rotation.x, rKnee, 0.25);
+        bp.rAnklePivot.rotation.x = L(bp.rAnklePivot.rotation.x, Math.sin(t + Math.PI) * 0.25, 0.25);
+        if (bp.lShoulderPivot) {
+            bp.lShoulderPivot.rotation.x = L(bp.lShoulderPivot.rotation.x, -Math.sin(t) * 0.5, 0.25);
+        }
+        if (bp.rShoulderPivot && !player.isFlashlightOn) {
+            bp.rShoulderPivot.rotation.x = L(bp.rShoulderPivot.rotation.x, -Math.sin(t + Math.PI) * 0.5, 0.25);
+            bp.rShoulderPivot.rotation.z = L(bp.rShoulderPivot.rotation.z, 0.08, 0.25);
+            bp.rElbowPivot.rotation.x = L(bp.rElbowPivot.rotation.x, 0.6, 0.25);
+        }
+    } else {
+        if (bp.torsoGroup) bp.torsoGroup.position.y = L(bp.torsoGroup.position.y, 1.10, 0.08);
+        bp.lHipPivot.rotation.x = L(bp.lHipPivot.rotation.x, 0, 0.08);
+        bp.rHipPivot.rotation.x = L(bp.rHipPivot.rotation.x, 0, 0.08);
+        bp.lKneePivot.rotation.x = L(bp.lKneePivot.rotation.x, 0, 0.08);
+        bp.rKneePivot.rotation.x = L(bp.rKneePivot.rotation.x, 0, 0.08);
+        if (bp.lShoulderPivot) {
+            bp.lShoulderPivot.rotation.x = L(bp.lShoulderPivot.rotation.x, 0.05, 0.06);
+        }
+        if (bp.rShoulderPivot && !player.isFlashlightOn) {
+            bp.rShoulderPivot.rotation.x = L(bp.rShoulderPivot.rotation.x, 0.05, 0.06);
+            bp.rShoulderPivot.rotation.z = L(bp.rShoulderPivot.rotation.z, 0.08, 0.06);
+            bp.rElbowPivot.rotation.x = L(bp.rElbowPivot.rotation.x, 0.12, 0.06);
+        }
+    }
+
+    // Apply remote IK if flashlight is equipped
+    if (player.isFlashlightOn && bp.rShoulderPivot && bp.rElbowPivot && player.spotlight && player.spotlight.target) {
+        // Force update world matrices for correct position tracking
+        if (bp.torsoGroup) bp.torsoGroup.updateMatrixWorld(true);
+        player.spotlight.target.updateMatrixWorld(true);
+
+        const L1 = 0.52;
+        const L2 = 0.46;
+        const targetWorldPos = new THREE.Vector3();
+        player.spotlight.target.getWorldPosition(targetWorldPos);
+
+        const targetLocal = bp.torsoGroup.worldToLocal(targetWorldPos.clone());
+        // Shift target slightly up and forward relative to torso space
+        targetLocal.y += 0.06;
+        targetLocal.z -= 0.03;
+        const v = new THREE.Vector3().subVectors(targetLocal, bp.rShoulderPivot.position);
+        const d = THREE.MathUtils.clamp(v.length(), 0.06, L1 + L2);
+
+        const dir = v.clone().normalize();
+        const theta_x = Math.asin(THREE.MathUtils.clamp(-dir.z, -1, 1));
+        const theta_z = Math.atan2(dir.x, -dir.y);
+
+        const cosElbow = (d * d - L1 * L1 - L2 * L2) / (2 * L1 * L2);
+        const elbowAngle = Math.acos(THREE.MathUtils.clamp(cosElbow, -1, 1));
+
+        const cosAlpha = (L1 * L1 + d * d - L2 * L2) / (2 * L1 * d);
+        const alpha = Math.acos(THREE.MathUtils.clamp(cosAlpha, -1, 1));
+
+        const shX = theta_x - alpha;
+        const shZ = theta_z;
+        const elX = elbowAngle;
+
+        bp.rShoulderPivot.rotation.x = L(bp.rShoulderPivot.rotation.x, shX, 0.25);
+        bp.rShoulderPivot.rotation.z = L(bp.rShoulderPivot.rotation.z, shZ, 0.25);
+        bp.rElbowPivot.rotation.x = L(bp.rElbowPivot.rotation.x, elX, 0.25);
+    }
+}
+
 // --- Initialization ---
 function init() {
     // 1. Scene Setup
@@ -150,11 +605,7 @@ function init() {
 
     // 2. Camera Setup
     // FPV Camera
-    camera = new THREE.PerspectiveCamera(60, (window.innerWidth / 2) / window.innerHeight, 0.005, 100);
-
-    // TPV Camera
-    thirdPersonCamera = new THREE.PerspectiveCamera(60, (window.innerWidth / 2) / window.innerHeight, 0.005, 100);
-    thirdPersonCamera.position.set(0, 0.2, 0.2); // Initial distance from avatar
+    camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.005, 100);
 
     initAudio(camera, scene);
 
@@ -235,6 +686,77 @@ function init() {
         tex.anisotropy = maxAnisotropy; // Maximum texture resolution at angles
     });
     groundDiff.colorSpace = THREE.SRGBColorSpace;
+
+    // Add moon sprite in the sky
+    const moonTexture = textureLoader.load('moon.png');
+    const moonMaterial = new THREE.SpriteMaterial({
+        map: moonTexture,
+        transparent: true,
+        opacity: 0.9,
+        depthWrite: false,
+        fog: false,
+        blending: THREE.AdditiveBlending
+    });
+    moonSprite = new THREE.Sprite(moonMaterial);
+    // Correct aspect ratio and scale for distance 80:
+    // Original width 3 at distance ~12.8 corresponds to width 18.75 at distance 80.
+    // Correct height scale is width * (height_pixel / width_pixel) = 18.75 * (607 / 800).
+    moonSprite.scale.set(18.75, 18.75 * (607 / 800), 1);
+    // Position it initially in the direction (0, 8, -10) at distance 80
+    const moonDir = new THREE.Vector3(0, 8, -10).normalize();
+    moonSprite.position.copy(moonDir).multiplyScalar(80);
+    scene.add(moonSprite);
+
+    // Add 16 stars in the sky (procedural glowing circles)
+    const starCanvas = document.createElement('canvas');
+    starCanvas.width = 128;
+    starCanvas.height = 128;
+    const starCtx = starCanvas.getContext('2d');
+    const center = 64;
+    const gradient = starCtx.createRadialGradient(center, center, 0, center, center, 64);
+    gradient.addColorStop(0, 'rgba(255, 255, 255, 1.0)');
+    gradient.addColorStop(0.15, 'rgba(255, 255, 255, 0.9)');
+    gradient.addColorStop(0.4, 'rgba(200, 220, 255, 0.4)');
+    gradient.addColorStop(0.7, 'rgba(150, 180, 255, 0.1)');
+    gradient.addColorStop(1, 'rgba(100, 140, 255, 0.0)');
+    starCtx.fillStyle = gradient;
+    starCtx.beginPath();
+    starCtx.arc(center, center, 64, 0, Math.PI * 2);
+    starCtx.fill();
+    const starTexture = new THREE.CanvasTexture(starCanvas);
+
+    const starPositions = [
+        { x: -5, y: 7, z: -8, scale: 0.12 },
+        { x: 4, y: 9, z: -12, scale: 0.09 },
+        { x: -8, y: 6, z: -15, scale: 0.1 },
+        { x: 7, y: 8, z: -6, scale: 0.07 },
+        { x: -3, y: 10, z: -14, scale: 0.08 },
+        { x: 6, y: 7, z: -11, scale: 0.06 },
+        { x: -9, y: 9, z: -10, scale: 0.11 },
+        { x: 2, y: 11, z: -16, scale: 0.08 },
+        { x: -6, y: 8, z: -5, scale: 0.07 },
+        { x: 9, y: 10, z: -13, scale: 0.09 },
+        { x: -1, y: 12, z: -9, scale: 0.1 },
+        { x: 5, y: 6, z: -17, scale: 0.06 },
+        { x: -7, y: 11, z: -12, scale: 0.08 },
+        { x: 8, y: 9, z: -7, scale: 0.1 },
+        { x: -4, y: 7, z: -18, scale: 0.07 },
+        { x: 3, y: 10, z: -10, scale: 0.09 }
+    ];
+    starPositions.forEach(pos => {
+        const starMaterial = new THREE.SpriteMaterial({
+            map: starTexture,
+            transparent: true,
+            opacity: 1.0,
+            depthWrite: false,
+            fog: false,
+            blending: THREE.AdditiveBlending
+        });
+        const star = new THREE.Sprite(starMaterial);
+        star.scale.set(pos.scale, pos.scale, 1);
+        star.position.set(pos.x, pos.y, pos.z);
+        scene.add(star);
+    });
 
     // 8. Load Assets
     gltfLoader = new GLTFLoader(loadingManager);
@@ -358,68 +880,23 @@ function init() {
         snapCampfireToGround();
     });
 
-    // --- Rigged Mixamo Avatar (local player) ---
-    gltfLoader.load('Avatars/Player-avatar.glb', (gltf) => {
-        playerModel = gltf.scene;
+    // --- Procedural Stickman Avatar (local player) ---
+    playerGroup = new THREE.Group();
+    scene.add(playerGroup);
 
-        // Scale avatar to match CONFIG.playerHeight (0.07m)
-        // Assume original model is roughly 1.8m; calculate scale factor
-        const box = new THREE.Box3().setFromObject(playerModel);
-        const size = new THREE.Vector3();
-        box.getSize(size);
-        const scaleFactor = CONFIG.playerHeight / size.y;
-        playerModel.scale.set(scaleFactor, scaleFactor, scaleFactor);
+    buildProceduralAvatar(playerGroup, true);
 
-        playerModel.traverse(child => {
-            if (child.isMesh) {
-                child.castShadow = true;
-                child.receiveShadow = true;
-            }
-        });
+    // Position first-person camera at eye level, shifted slightly forward to clear head/neck geometry
+    camera.position.set(0, CONFIG.playerHeight * 0.90, -CONFIG.playerHeight * 0.05);
+    camera.rotation.set(0, Math.PI, 0);
+    playerGroup.add(camera);
 
-        // Set up player group to rotate/translate cleanly
-        playerGroup = new THREE.Group();
-        playerGroup.add(playerModel);
+    // Cache bone references
+    // bodyParts already populated by buildProceduralAvatar
 
-        // 1. Animation Setup
-        mixer = new THREE.AnimationMixer(playerModel);
-        animationsMap = {};
-        gltf.animations.forEach(clip => {
-            // Map based on name keywords (Idle, Walk, Sprint, Jump)
-            const name = clip.name.toLowerCase();
-            if (name.includes('idle')) animationsMap['idle'] = mixer.clipAction(clip);
-            else if (name.includes('walk')) animationsMap['walk'] = mixer.clipAction(clip);
-            else if (name.includes('run') || name.includes('sprint')) animationsMap['sprint'] = mixer.clipAction(clip);
-            else if (name.includes('jump')) animationsMap['jump'] = mixer.clipAction(clip);
-        });
-
-        // Start with Idle
-        if (animationsMap['idle']) {
-            currentAction = animationsMap['idle'];
-            currentAction.play();
-        }
-
-        // 2. First-Person Camera Attachment
-        // Locate the head bone (Mixamo typically uses 'mixamorig_Head')
-        const headBone = playerModel.getObjectByName('mixamorig_Head');
-        if (headBone) {
-            // Attach camera to head bone
-            headBone.add(camera);
-            // Offset camera to avoid clipping into the mesh (slightly forward and up)
-            camera.position.set(0, 0.005, 0);
-            camera.rotation.set(0, 0, 0);
-        } else {
-            console.warn("Head bone 'mixamorig_Head' not found, using fallback camera position.");
-            camera.position.set(0, CONFIG.playerHeight * 0.95, 0);
-            playerGroup.add(camera);
-        }
-
-        scene.add(playerGroup);
-
-        // Place player group at spawn
-        resetPlayerPosition();
-        spawnRedEyes();
-    });
+    // Place player group at spawn
+    resetPlayerPosition();
+    spawnRedEyes();
 
     // Load Campfire Model at map center
     gltfLoader.load('camp_fire.glb', (gltf) => {
@@ -762,58 +1239,29 @@ function resetPlayerPosition() {
 
 // --- Window resizing ---
 function onWindowResize() {
-    const halfWidth = window.innerWidth / 2;
-    camera.aspect = halfWidth / window.innerHeight;
+    camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
-
-    thirdPersonCamera.aspect = halfWidth / window.innerHeight;
-    thirdPersonCamera.updateProjectionMatrix();
 
     renderer.setSize(window.innerWidth, window.innerHeight);
 }
 
-// --- Crossfade Animations ---
-function fadeToAction(nextAction, duration = 0.25) {
-    if (nextAction && currentAction !== nextAction) {
-        const prevAction = currentAction;
-        currentAction = nextAction;
-
-        currentAction.reset();
-        currentAction.setEffectiveTimeScale(1);
-        currentAction.setEffectiveWeight(1);
-        currentAction.crossFadeFrom(prevAction, duration, true);
-        currentAction.play();
-    } else if (!currentAction && nextAction) {
-        currentAction = nextAction;
-        currentAction.play();
-    }
-}
-
 function updatePlayerAnimations(deltaTime) {
-    if (!mixer) return;
-
-    // Update mixer
-    mixer.update(deltaTime);
-
-    // Determine desired animation based on state
-    let targetAction = null;
-
-    if (!isGrounded) {
-        targetAction = animationsMap['jump'];
-    } else if (keys['w'] || keys['arrowup'] || (isTouchDevice && joystickDir.lengthSq() > 0)) {
-        if (localIsSprintingActive) {
-            targetAction = animationsMap['sprint'];
-        } else {
-            targetAction = animationsMap['walk'];
-        }
-    } else {
-        targetAction = animationsMap['idle'];
+    // --- Stickman Avatar Animation Update ---
+    const isMoving = keys['w'] || keys['arrowup'] || keys['s'] || keys['arrowdown'] ||
+                     keys['a'] || keys['arrowleft'] || keys['d'] || keys['arrowright'] ||
+                     (isTouchDevice && joystickDir.lengthSq() > 0);
+    prevVertVel = verticalVelocity;
+    const yawDelta = yaw - prevYaw;
+    const targetTwist = THREE.MathUtils.clamp(yawDelta * 15, -0.3, 0.3);
+    torsoTwist = L(torsoTwist, targetTwist, 0.12);
+    prevYaw = yaw;
+    if (bodyParts.torsoGroup) bodyParts.torsoGroup.rotation.y = torsoTwist;
+    if (bodyParts.headGroup) {
+        const headPitch = THREE.MathUtils.clamp(pitch * 0.6, -0.5, 0.5);
+        bodyParts.headGroup.rotation.x = L(bodyParts.headGroup.rotation.x, headPitch, 0.1);
     }
 
-    // Smooth transition to target action
-    if (targetAction) {
-        fadeToAction(targetAction);
-    }
+    animateCharacter(deltaTime, isMoving);
 }
 
 // --- Main Loop ---
@@ -930,7 +1378,7 @@ function animate() {
     // For split screen: local model must be visible in TPV, but we can't simply set .visible = false
     // because it affects all cameras. We will handle visibility during render passes.
 
-    // Update real-time coordinates overlay (Shift to right half of screen)
+    // Update real-time coordinates overlay
     if (playerGroup) {
         const coordsValues = document.getElementById('coords-values');
         if (coordsValues) {
@@ -940,7 +1388,6 @@ function animate() {
                 Z: ${playerGroup.position.z.toFixed(4)}<br>
                 Grounded: ${isGrounded ? 'Yes' : 'No (Air)'}
             `;
-            coordsValues.style.left = 'calc(50% + 10px)';
         }
     }
 
@@ -973,40 +1420,40 @@ function animate() {
     // Camera is statically positioned at eye-level on the cylinder (set during init)
     // No bone-tracking needed
 
-    // --- Split Screen Rendering ---
+    // --- Full Screen First Person Rendering ---
     const width = window.innerWidth;
     const height = window.innerHeight;
-    const halfWidth = width / 2;
 
-    renderer.setScissorTest(true);
-
-    // 1. Third Person View (Left Side)
-    renderer.setViewport(0, 0, halfWidth, height);
-    renderer.setScissor(0, 0, halfWidth, height);
-
-    // TPV Camera Follow Logic
-    if (playerGroup && thirdPersonCamera) {
-        // Offset behind and above player: 0.1m back, 0.05m up
-        const relativeCameraOffset = new THREE.Vector3(0, 0.05, 0.1);
-        const cameraOffset = relativeCameraOffset.applyMatrix4(playerGroup.matrixWorld);
-
-        thirdPersonCamera.position.lerp(cameraOffset, 0.1);
-        thirdPersonCamera.lookAt(playerGroup.position);
-    }
-
-    if (playerModel) playerModel.visible = true; // Ensure model is visible for TPV
-    renderer.render(scene, thirdPersonCamera);
-
-    // 2. First Person View (Right Side)
-    renderer.setViewport(halfWidth, 0, halfWidth, height);
-    renderer.setScissor(halfWidth, 0, halfWidth, height);
+    renderer.setScissorTest(false);
+    renderer.setViewport(0, 0, width, height);
 
     if (camera) {
         camera.rotation.set(pitch, 0, 0);
     }
 
-    if (playerModel) playerModel.visible = false; // Hide body in FPV to prevent clipping
-    renderer.render(scene, camera);
+    // Hide main player model in FPV
+    if (playerModel) {
+        playerModel.traverse(child => {
+            if (child.isMesh) child.visible = false;
+        });
+        if (bodyParts.lForearm) bodyParts.lForearm.visible = true;
+        if (bodyParts.lHand) bodyParts.lHand.visible = true;
+        if (selectedSlot === 1) {
+            if (bodyParts.rForearm) bodyParts.rForearm.visible = true;
+            if (bodyParts.rHand) bodyParts.rHand.visible = true;
+        }
+    }
+
+    // Update moon position relative to camera world position to prevent it moving when the player moves
+    if (camera && moonSprite) {
+        camera.getWorldPosition(tempCameraWorldPos);
+        moonSprite.position.copy(tempCameraWorldPos).add(moonOffset);
+    }
+
+    // Render FPV
+    if (camera) {
+        renderer.render(scene, camera);
+    }
 }
 
 // --- Player Controls & Physics ---
@@ -1035,7 +1482,7 @@ function updatePlayerMovement(deltaTime) {
             playerGroup.position.addScaledVector(flyDir, speed * deltaTime);
         }
 
-        updateAudio(deltaTime, false, false, false, panicIntensity, otherPlayers);
+        updateAudio(deltaTime, false, false, false, panicIntensity, otherPlayers, playerEnergy);
         return;
     }
 
@@ -2087,10 +2534,12 @@ function updateFootprints() {
 
 // --- Multiplayer Client Logic ---
 function initMultiplayer() {
+    const urlParams = new URLSearchParams(window.location.search);
+    const lobbyCode = urlParams.get('lobby') || 'global';
     const socketProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const socketUrl = `${socketProtocol}//${window.location.host}`;
+    const socketUrl = `${socketProtocol}//${window.location.host}?lobby=${lobbyCode}`;
 
-    console.log("Connecting to multiplayer server at:", socketUrl);
+    console.log(`Connecting to multiplayer server lobby [${lobbyCode}] at:`, socketUrl);
     ws = new WebSocket(socketUrl);
 
     ws.onopen = () => {
@@ -2137,50 +2586,8 @@ function createRemotePlayer(p) {
     const group = new THREE.Group();
     let spotlight = null;
 
-    // Instead of a cylinder, load the Mixamo Avatar for remote players
-    gltfLoader.load('Avatars/Player-avatar.glb', (gltf) => {
-        const remoteModel = gltf.scene;
-
-        // Scale avatar to match CONFIG.playerHeight (0.07m)
-        const box = new THREE.Box3().setFromObject(remoteModel);
-        const size = new THREE.Vector3();
-        box.getSize(size);
-        const scaleFactor = CONFIG.playerHeight / size.y;
-        remoteModel.scale.set(scaleFactor, scaleFactor, scaleFactor);
-
-        remoteModel.traverse(child => {
-            if (child.isMesh) {
-                child.castShadow = true;
-                child.receiveShadow = true;
-            }
-        });
-
-        group.add(remoteModel);
-
-        // Animation Setup for remote player
-        const remoteMixer = new THREE.AnimationMixer(remoteModel);
-        const remoteAnimationsMap = {};
-        gltf.animations.forEach(clip => {
-            const name = clip.name.toLowerCase();
-            if (name.includes('idle')) remoteAnimationsMap['idle'] = remoteMixer.clipAction(clip);
-            else if (name.includes('walk')) remoteAnimationsMap['walk'] = remoteMixer.clipAction(clip);
-            else if (name.includes('run') || name.includes('sprint')) remoteAnimationsMap['sprint'] = remoteMixer.clipAction(clip);
-            else if (name.includes('jump')) remoteAnimationsMap['jump'] = remoteMixer.clipAction(clip);
-        });
-
-        // Start with Idle
-        if (remoteAnimationsMap['idle']) {
-            remoteAnimationsMap['idle'].play();
-        }
-
-        // Store mixer and map in the player object for the update loop
-        const playerInfo = otherPlayers.get(p.id);
-        if (playerInfo) {
-            playerInfo.mixer = remoteMixer;
-            playerInfo.animationsMap = remoteAnimationsMap;
-            playerInfo.currentAction = remoteAnimationsMap['idle'];
-        }
-    });
+    // Build procedural stickman for remote player
+    const { bodyParts: remoteBP } = buildProceduralAvatar(group, false);
 
     // Spotlight for remote player's flashlight beam
     spotlight = new THREE.SpotLight(0xffffff, 4.0, 1.2, 0.38, 0.5, 1.0);
@@ -2236,13 +2643,17 @@ function createRemotePlayer(p) {
 
     otherPlayers.set(p.id, {
         mesh: group,
+        bodyParts: remoteBP,
         spotlight: spotlight,
         tagMesh: tagMesh,
         targetPosition: new THREE.Vector3(startX, startY, startZ),
         targetYaw: startYaw,
         targetPitch: startPitch,
         currentPitch: startPitch,
-        isFlashlightOn: isFlashOn
+        isFlashlightOn: isFlashOn,
+        walkTime: 0,
+        turnLean: 0,
+        prevYaw: startYaw
     });
 }
 
@@ -2264,20 +2675,9 @@ function updateRemotePlayer(p) {
     player.isSprinting = p.isSprinting !== undefined ? !!p.isSprinting : player.isSprinting;
     player.spotlight.visible = player.isFlashlightOn;
 
-    // Handle Animation Sync
-    if (player.mixer && p.animState) {
-        const targetAction = player.animationsMap[p.animState];
-        if (targetAction && player.currentAction !== targetAction) {
-            const prevAction = player.currentAction;
-            player.currentAction = targetAction;
-            player.currentAction.reset();
-            player.currentAction.setEffectiveTimeScale(1);
-            player.currentAction.setEffectiveWeight(1);
-            if (prevAction) {
-                player.currentAction.crossFadeFrom(prevAction, 0.25, true);
-            }
-            player.currentAction.play();
-        }
+    // Handle Animation Sync (stickman remote)
+    if (p.animState) {
+        player.remoteAnimState = p.animState;
     }
 
     // Show remote player once they start sending position updates
@@ -2315,10 +2715,8 @@ function removeRemotePlayer(id) {
 
 function lerpRemotePlayers(deltaTime) {
     otherPlayers.forEach(p => {
-        // Update animation mixer for remote players
-        if (p.mixer) {
-            p.mixer.update(deltaTime);
-        }
+        // Animate remote stickman avatar
+        animateRemoteAvatar(p, deltaTime);
 
         // Smoothly interpolate position and yaw rotation (reduces lag jitter!)
         p.mesh.position.lerp(p.targetPosition, 12 * deltaTime);
