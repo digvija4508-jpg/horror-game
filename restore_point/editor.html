@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Horror Garden - Map Editor</title>
+    <!-- Google Fonts for premium looks -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=JetBrains+Mono&display=swap" rel="stylesheet">
+    
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+    
+    <style>
+        :root {
+            --bg-dark: #090d16;
+            --panel-bg: rgba(13, 20, 32, 0.82);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --accent-glow: #ff7f50;
+            --accent-glow-rgb: 255, 127, 80;
+            --text-main: #f1f2f6;
+            --text-muted: #a4b0be;
+            --sidebar-width: 320px;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            user-select: none;
+            -webkit-user-drag: none;
+        }
+
+        body {
+            font-family: 'Outfit', sans-serif;
+            background-color: var(--bg-dark);
+            color: var(--text-main);
+            overflow: hidden;
+            height: 100vh;
+            width: 100vw;
+        }
+
+        /* 3D Viewport */
+        #editor-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+        }
+
+        /* UI Overlays */
+        .editor-ui {
+            position: absolute;
+            z-index: 10;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .interactive {
+            pointer-events: auto;
+        }
+
+        /* Glassmorphism Panels */
+        .glass-panel {
+            background: var(--panel-bg);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+            transition: all 0.2s ease;
+        }
+
+        /* Header / Toolbar */
+        header {
+            top: 15px;
+            left: 15px;
+            right: 15px;
+            height: 60px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 20px;
+            width: calc(100% - 30px);
+        }
+
+        .logo-title {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .logo-title h1 {
+            font-size: 18px;
+            font-weight: 800;
+            letter-spacing: 0.5px;
+            background: linear-gradient(135deg, #ffffff, #ffa07a);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .logo-title span {
+            background: var(--accent-glow);
+            color: var(--bg-dark);
+            font-size: 11px;
+            font-weight: 800;
+            padding: 2px 6px;
+            border-radius: 4px;
+            text-transform: uppercase;
+        }
+
+        /* Transform Toolbar */
+        .toolbar-group {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .tool-btn {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+            padding: 6px 14px;
+            border-radius: 6px;
+            font-family: inherit;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            transition: all 0.15s ease;
+        }
+
+        .tool-btn:hover {
+            background: rgba(255, 255, 255, 0.08);
+            border-color: rgba(255, 255, 255, 0.2);
+        }
+
+        .tool-btn.active {
+            background: rgba(var(--accent-glow-rgb), 0.15);
+            border-color: var(--accent-glow);
+            color: var(--accent-glow);
+            box-shadow: 0 0 10px rgba(var(--accent-glow-rgb), 0.3);
+        }
+
+        .divider {
+            width: 1px;
+            height: 20px;
+            background: var(--border-color);
+            margin: 0 4px;
+        }
+
+        /* Sidebar - Properties Panel */
+        aside {
+            top: 90px;
+            right: 15px;
+            bottom: 50px;
+            width: var(--sidebar-width);
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            overflow-y: auto;
+        }
+
+        .panel-section-title {
+            font-size: 14px;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            color: var(--accent-glow);
+            margin-bottom: 10px;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 6px;
+        }
+
+        .selection-name {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            background: rgba(0, 0, 0, 0.3);
+            padding: 8px 12px;
+            border-radius: 6px;
+            word-wrap: break-word;
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+        }
+
+        /* Transform Inputs Row */
+        .property-row {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            margin-bottom: 12px;
+        }
+
+        .property-row label {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-muted);
+        }
+
+        .vector-inputs {
+            display: flex;
+            gap: 8px;
+        }
+
+        .vector-field {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            background: rgba(0, 0, 0, 0.25);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            overflow: hidden;
+        }
+
+        .vector-label {
+            width: 18px;
+            text-align: center;
+            font-size: 11px;
+            font-weight: 800;
+            color: var(--text-muted);
+            border-right: 1px solid var(--border-color);
+        }
+
+        .vector-label.x { background: rgba(255, 71, 87, 0.15); color: #ff4757; }
+        .vector-label.y { background: rgba(46, 213, 115, 0.15); color: #2ed573; }
+        .vector-label.z { background: rgba(84, 160, 255, 0.15); color: #54a0ff; }
+
+        .vector-input {
+            width: 100%;
+            background: transparent;
+            border: none;
+            color: var(--text-main);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            padding: 5px;
+            outline: none;
+            text-align: center;
+        }
+
+        /* Action Buttons */
+        .btn-primary {
+            width: 100%;
+            background: var(--accent-glow);
+            color: var(--bg-dark);
+            border: none;
+            border-radius: 6px;
+            padding: 10px;
+            font-family: inherit;
+            font-size: 14px;
+            font-weight: 800;
+            cursor: pointer;
+            transition: all 0.15s ease;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .btn-primary:hover {
+            box-shadow: 0 0 15px rgba(var(--accent-glow-rgb), 0.5);
+            transform: translateY(-1px);
+        }
+
+        .btn-secondary {
+            width: 100%;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+            border-radius: 6px;
+            padding: 8px;
+            font-family: inherit;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+
+        .btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        /* Bottom Controls / Help Bar */
+        footer {
+            bottom: 10px;
+            left: 15px;
+            right: 15px;
+            height: 35px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 15px;
+            width: calc(100% - 30px);
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+
+        .help-keys {
+            display: flex;
+            gap: 12px;
+        }
+
+        .key-badge {
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid var(--border-color);
+            padding: 1px 6px;
+            border-radius: 4px;
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--text-main);
+            font-size: 10px;
+        }
+
+        /* Modal Overlays */
+        .modal-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(5, 7, 12, 0.85);
+            z-index: 100;
+            display: none;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-content {
+            width: 500px;
+            max-width: 90%;
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .modal-title {
+            font-size: 18px;
+            font-weight: 800;
+            color: var(--accent-glow);
+        }
+
+        .modal-textarea {
+            width: 100%;
+            height: 200px;
+            background: rgba(0, 0, 0, 0.4);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            color: var(--text-main);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            padding: 10px;
+            outline: none;
+            resize: none;
+        }
+
+        /* Loading Spinner */
+        #editor-loader {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: var(--bg-dark);
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 15px;
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid rgba(255, 127, 80, 0.15);
+            border-top: 3px solid var(--accent-glow);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <!-- 3D Canvas -->
+    <canvas id="editor-canvas"></canvas>
+
+    <!-- Loading Overlay -->
+    <div id="editor-loader">
+        <div class="spinner"></div>
+        <p style="font-weight: 600; letter-spacing: 0.5px;">Loading horror garden map editor...</p>
+    </div>
+
+    <!-- Header Toolbar -->
+    <header class="editor-ui glass-panel interactive">
+        <div class="logo-title">
+            <h1>Horror Garden</h1>
+            <span>Map Editor</span>
+        </div>
+        
+        <div class="toolbar-group">
+            <button id="tool-select" class="tool-btn active">Select</button>
+            <div class="divider"></div>
+            <button id="tool-translate" class="tool-btn" title="Translate (W)"><span class="key-badge">W</span> Move</button>
+            <button id="tool-rotate" class="tool-btn" title="Rotate (E)"><span class="key-badge">E</span> Rotate</button>
+            <button id="tool-scale" class="tool-btn" title="Scale (R)"><span class="key-badge">R</span> Scale</button>
+            <div class="divider"></div>
+            <button id="toggle-snap" class="tool-btn active">Snap Grid</button>
+        </div>
+
+        <div class="toolbar-group">
+            <button id="btn-import" class="tool-btn">Import JSON</button>
+            <button id="btn-export" class="tool-btn">Export Layout</button>
+            <button id="btn-launch" class="tool-btn active" style="background: rgba(46, 213, 115, 0.15); border-color: #2ed573; color: #2ed573;">Play Game</button>
+        </div>
+    </header>
+
+    <!-- Properties Sidebar -->
+    <aside class="editor-ui glass-panel interactive">
+        <div>
+            <h2 class="panel-section-title">Selected Object</h2>
+            <div id="selected-object-name" class="selection-name">None Selected</div>
+        </div>
+
+        <div id="properties-container" style="display: none;">
+            <!-- Position -->
+            <div class="property-row">
+                <label>Position (Meters)</label>
+                <div class="vector-inputs">
+                    <div class="vector-field">
+                        <div class="vector-label x">X</div>
+                        <input id="pos-x" type="number" step="0.01" class="vector-input">
+                    </div>
+                    <div class="vector-field">
+                        <div class="vector-label y">Y</div>
+                        <input id="pos-y" type="number" step="0.01" class="vector-input">
+                    </div>
+                    <div class="vector-field">
+                        <div class="vector-label z">Z</div>
+                        <input id="pos-z" type="number" step="0.01" class="vector-input">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Rotation -->
+            <div class="property-row">
+                <label>Rotation (Degrees)</label>
+                <div class="vector-inputs">
+                    <div class="vector-field">
+                        <div class="vector-label x">X</div>
+                        <input id="rot-x" type="number" step="1" class="vector-input">
+                    </div>
+                    <div class="vector-field">
+                        <div class="vector-label y">Y</div>
+                        <input id="rot-y" type="number" step="1" class="vector-input">
+                    </div>
+                    <div class="vector-field">
+                        <div class="vector-label z">Z</div>
+                        <input id="rot-z" type="number" step="1" class="vector-input">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Scale -->
+            <div class="property-row">
+                <label>Scale</label>
+                <div class="vector-inputs">
+                    <div class="vector-field">
+                        <div class="vector-label x">X</div>
+                        <input id="scale-x" type="number" step="0.05" class="vector-input">
+                    </div>
+                    <div class="vector-field">
+                        <div class="vector-label y">Y</div>
+                        <input id="scale-y" type="number" step="0.05" class="vector-input">
+                    </div>
+                    <div class="vector-field">
+                        <div class="vector-label z">Z</div>
+                        <input id="scale-z" type="number" step="0.05" class="vector-input">
+                    </div>
+                </div>
+            </div>
+
+            <div style="margin-top: 10px; display: flex; flex-direction: column; gap: 8px;">
+                <button id="btn-snap-ground" class="btn-secondary">Snap to Ground Terrain</button>
+                <button id="btn-reset-selected" class="btn-secondary">Reset Object Transforms</button>
+            </div>
+        </div>
+
+        <div style="margin-top: auto; display: flex; flex-direction: column; gap: 10px; border-top: 1px solid var(--border-color); padding-top: 15px;">
+            <button id="btn-clear-all" class="btn-secondary" style="border-color: rgba(255, 71, 87, 0.4); color: #ff4757;">Reset All Overrides</button>
+            <button id="btn-save" class="btn-primary">Save Overrides</button>
+        </div>
+    </aside>
+
+    <!-- Help Status Bar -->
+    <footer class="editor-ui glass-panel">
+        <div>Status: Ready</div>
+        <div class="help-keys">
+            <span><span class="key-badge">L-Click</span> Select Object</span>
+            <span><span class="key-badge">R-Click + Drag</span> Rotate Cam</span>
+            <span><span class="key-badge">Shift + R-Click</span> Pan Cam</span>
+            <span><span class="key-badge">Scroll</span> Zoom</span>
+        </div>
+    </footer>
+
+    <!-- JSON Modal -->
+    <div id="json-modal" class="modal-overlay interactive">
+        <div class="modal-content glass-panel">
+            <h3 id="modal-title" class="modal-title">Export Layout JSON</h3>
+            <p id="modal-desc" style="font-size: 13px; color: var(--text-muted);">Below is the coordinates overrides config. Copy it, or paste a new one here to import.</p>
+            <textarea id="modal-textarea" class="modal-textarea"></textarea>
+            <div style="display: flex; gap: 10px; justify-content: flex-end;">
+                <button id="modal-btn-cancel" class="btn-secondary" style="width: 80px;">Cancel</button>
+                <button id="modal-btn-action" class="btn-primary" style="width: 100px;">Apply</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Editor Logic Module -->
+    <script type="module" src="editor.js"></script>
+</body>
+</html>

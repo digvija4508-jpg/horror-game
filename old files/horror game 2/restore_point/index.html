@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Autumn Forest Exploration</title>
+    <link rel="stylesheet" href="style.css?v=2">
+    <!-- Google Fonts for premium typography -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+    
+    <!-- Import map for resolving bare specifiers like 'three' in ES Modules -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+                "three.quarks": "https://esm.sh/three.quarks@0.15.7?external=three"
+            }
+        }
+    </script>
+</head>
+<body>
+    <!-- Canvas for 3D Game -->
+    <canvas id="game-canvas"></canvas>
+
+    <!-- Loading Screen Overlay -->
+    <div id="loading-screen" class="overlay">
+        <div class="glass-panel text-center">
+            <h1 class="title-gradient">Autumn Forest</h1>
+            <p class="subtitle">Preparing the 3D environment...</p>
+            
+            <div class="loading-bar-container">
+                <div id="loading-bar" class="loading-bar"></div>
+            </div>
+            <div id="loading-text" class="loading-text">Loading: 0%</div>
+            
+            <div class="loading-details">
+                <p id="loading-file">Initializing assets...</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Start Menu Overlay -->
+    <div id="start-screen" class="overlay hidden">
+        <div class="glass-panel start-panel text-center">
+            <h1 class="title-gradient main-title">Forest Adventure</h1>
+            <p class="subtitle">First-person microscopic garden adventure</p>
+            
+            <div class="instructions-panel">
+                <h3>CONTROLS</h3>
+                <div class="controls-grid">
+                    <div class="control-item">
+                        <span class="keys-row">
+                            <span class="key">W</span>
+                            <span class="key">A</span>
+                            <span class="key">S</span>
+                            <span class="key">D</span>
+                        </span>
+                        <span class="label">Move Avatar</span>
+                    </div>
+                    <div class="control-item">
+                        <span class="mouse-icon">🖱️</span>
+                        <span class="label">Drag Screen to Look around smoothly</span>
+                    </div>
+                </div>
+            </div>
+            
+            <button id="start-button" class="btn btn-primary">ENTER GARDEN</button>
+        </div>
+    </div>
+
+    <!-- In-Game HUD -->
+    <div id="game-hud" class="hud hidden">
+        <div class="hud-panel">
+            <h3>Garden Explorer</h3>
+            <div class="hud-controls">
+                <p><strong>WASD Keys:</strong> Move Avatar</p>
+                <p><strong>Mouse Look:</strong> Move Mouse</p>
+                <p><strong>1-9 Keys:</strong> Select Hotbar</p>
+                <p><strong>ESC Key:</strong> Pause Game</p>
+            </div>
+            <button id="reset-button" class="btn-sm">Reset Position</button>
+        </div>
+    </div>
+
+    <!-- Horror Vignette Overlay -->
+    <div class="vignette"></div>
+
+    <!-- Minecraft Hotbar Inventory -->
+    <div id="hotbar" class="hotbar hidden">
+        <div class="hotbar-slot selected" data-slot="1"><span class="hotbar-icon">🔦</span><span class="hotbar-num">1</span></div>
+        <div class="hotbar-slot" data-slot="2"><span class="hotbar-icon">🔑</span><span class="hotbar-num">2</span></div>
+        <div class="hotbar-slot" data-slot="3"><span class="hotbar-icon">🗺️</span><span class="hotbar-num">3</span></div>
+        <div class="hotbar-slot" data-slot="4"><span class="hotbar-num">4</span></div>
+        <div class="hotbar-slot" data-slot="5"><span class="hotbar-num">5</span></div>
+        <div class="hotbar-slot" data-slot="6"><span class="hotbar-num">6</span></div>
+        <div class="hotbar-slot" data-slot="7"><span class="hotbar-num">7</span></div>
+        <div class="hotbar-slot" data-slot="8"><span class="hotbar-num">8</span></div>
+        <div class="hotbar-slot" data-slot="9"><span class="hotbar-num">9</span></div>
+     </div>
+
+    <!-- Top-Left HUD (Minimap & Coordinates) -->
+    <div id="coords-display" class="top-left-hud hidden">
+        <!-- Minimap Panel -->
+        <div class="top-left-panel" style="pointer-events: auto;">
+            <div class="panel-title">MINIMAP</div>
+            <div style="position: relative; width: 120px; height: 120px; margin: 0 auto; overflow: hidden; border-radius: 50%; border: 2px solid rgba(255, 255, 255, 0.15); box-shadow: 0 4px 10px rgba(0,0,0,0.5);">
+                <canvas id="minimap-webgl-canvas" width="120" height="120" style="position: absolute; top: 0; left: 0; width: 120px; height: 120px;"></canvas>
+                <canvas id="minimap-hud-canvas" width="120" height="120" style="position: absolute; top: 0; left: 0; width: 120px; height: 120px; pointer-events: none; z-index: 10;"></canvas>
+            </div>
+        </div>
+        <!-- Coordinates Panel -->
+        <div class="top-left-panel">
+            <div class="panel-title">COORDINATES</div>
+            <div id="coords-values">
+                X: 0.0000<br>
+                Y: 0.1500<br>
+                Z: 0.0000<br>
+                Grounded: Yes
+            </div>
+        </div>
+    </div>
+
+    <!-- Debug Error Overlay -->
+    <div id="debug-error" style="position: absolute; top: 10px; left: 10px; color: #ff3f3f; font-family: monospace; font-size: 14px; z-index: 10000; background: rgba(0,0,0,0.9); padding: 12px; border: 2px solid #ff3f3f; border-radius: 4px; display: none; pointer-events: none; max-width: 90%; word-wrap: break-word; box-shadow: 0 4px 20px rgba(0,0,0,0.8);"></div>
+
+    <!-- Game Logic -->
+    <script type="module" src="game.js?v=64"></script>
+</body>
+</html>

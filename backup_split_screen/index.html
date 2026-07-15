@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Autumn Forest Exploration</title>
+    <link rel="stylesheet" href="style.css">
+    <!-- Google Fonts for premium typography -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+    
+    <!-- Import map for resolving bare specifiers like 'three' in ES Modules -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+</head>
+<body>
+    <!-- Canvas for 3D Game -->
+    <canvas id="game-canvas"></canvas>
+
+    <!-- Loading Screen Overlay -->
+    <div id="loading-screen" class="overlay">
+        <div class="glass-panel text-center">
+            <h1 class="title-gradient">Autumn Forest</h1>
+            <p class="subtitle">Preparing the 3D environment...</p>
+            
+            <div class="loading-bar-container">
+                <div id="loading-bar" class="loading-bar"></div>
+            </div>
+            <div id="loading-text" class="loading-text">Loading: 0%</div>
+            
+            <div class="loading-details">
+                <p id="loading-file">Initializing assets...</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Start Menu Overlay -->
+    <div id="start-screen" class="overlay hidden">
+        <div class="glass-panel start-panel text-center">
+            <h1 class="title-gradient main-title">Forest Adventure</h1>
+            <p class="subtitle">First-person microscopic garden adventure</p>
+            
+            <div class="instructions-panel">
+                <h3>CONTROLS</h3>
+                <div class="controls-grid">
+                    <div class="control-item">
+                        <span class="keys-row">
+                            <span class="key">W</span>
+                            <span class="key">A</span>
+                            <span class="key">S</span>
+                            <span class="key">D</span>
+                        </span>
+                        <span class="label">Move Avatar</span>
+                    </div>
+                    <div class="control-item">
+                        <span class="mouse-icon">🖱️</span>
+                        <span class="label">Drag Screen to Look around smoothly</span>
+                    </div>
+                </div>
+            </div>
+            
+            <button id="start-button" class="btn btn-primary">ENTER GARDEN</button>
+        </div>
+    </div>
+
+    <!-- In-Game HUD -->
+    <div id="game-hud" class="hud hidden">
+        <div class="hud-panel">
+            <h3>Garden Explorer</h3>
+            <div class="hud-controls">
+                <p><strong>WASD Keys:</strong> Move Avatar</p>
+                <p><strong>Drag Mouse:</strong> Look Around</p>
+            </div>
+            <button id="reset-button" class="btn-sm">Reset Position</button>
+            <button id="pause-button" class="btn-sm" style="margin-top: 6px;">Pause Game</button>
+        </div>
+    </div>
+
+    <!-- Game Logic -->
+    <script type="module" src="game.js?v=5"></script>
+</body>
+</html>
