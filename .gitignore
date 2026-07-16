@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# Executables & binaries
+*.exe
+*.msi
+
+# Temporary folders
+scratch/
+restore_point/
+backup_split_screen/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Large binary assets (3D models, textures, audio)
+*.glb
+*.fbx
+*.zip
+*.mp3
+*.mpeg
+*.wav
+*.ogg
+
+# Downloaded assets
+downloaded_assets/
+
+# Cloudflared binary
+cloudflared*

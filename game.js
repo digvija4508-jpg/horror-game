@@ -7,7 +7,7 @@ let localIsSprintingActive = false;
 import * as QUARKS from 'three.quarks';
 
 // Global error logger to display runtime exceptions directly on the screen
-window.onerror = function(message, source, lineno, colno, error) {
+window.onerror = function (message, source, lineno, colno, error) {
     const errDiv = document.getElementById('debug-error');
     if (errDiv) {
         errDiv.style.display = 'block';
@@ -25,7 +25,7 @@ const CONFIG = {
     raycastHeightOffset: 0.30, // Elevated to support high step climbs
     stepLimit: 0.22,           // Generous climb limit to walk up sloped leaves and grass smoothly
     playerHeight: 0.07,        // Scale player to 7cm
-    fogDensity: 4.5,           // Balanced fog density for playable visible distance at night
+    fogDensity: 2.5,           // Balanced fog density for playable visible distance at night
     ambientLightIntensity: 0.12 // Playable midnight ambient level (can see outlines of grass)
 };
 
@@ -34,8 +34,19 @@ let clock = new THREE.Clock();
 
 // Game entities
 let mapModel = null;
-let playerModel = null; // Simple cylinder mesh
+let playerModel = null; // Root mesh group of the procedural avatar
 let playerGroup = null; // Group holding the player mesh for easier rotation/positioning
+
+// --- Procedural Stickman Avatar State ---
+let bodyParts = {};
+let animState = 'idle';
+let animTimer = 0;
+let landTimer = 0;
+let prevVertVel = 0;
+let torsoTwist = 0;
+let prevYaw = 0;
+let turnLean = 0;
+let walkTime = 0;
 let collidableMeshes = [];
 
 // Smooth Mouse Look Rotation (Yaw & Pitch)
@@ -56,6 +67,10 @@ let panicIntensity = 0; // Horror tension factor when red eyes are near
 
 // Creepy Red Eyes state
 let redEyesList = [];
+
+let moonSprite = null;
+const tempCameraWorldPos = new THREE.Vector3();
+const moonOffset = new THREE.Vector3(0, 8, -10).normalize().multiplyScalar(80);
 
 // Deterministic insect and firefly particles
 let fireflies = [];
@@ -130,17 +145,6 @@ let animationsMap = {};
 let currentAction = null;
 let walkCycle = 0;
 
-// Procedural avatar state
-let bodyParts = {};
-let animState = 'idle';
-let animTimer = 0;
-let landTimer = 0;
-let prevVertVel = 0;
-let torsoTwist = 0;
-let prevYaw = 0;
-let turnLean = 0;
-let walkTime = 0;
-
 // UI Elements
 const loadingScreen = document.getElementById('loading-screen');
 const loadingBar = document.getElementById('loading-bar');
@@ -151,599 +155,7 @@ const startButton = document.getElementById('start-button');
 const gameHud = document.getElementById('game-hud');
 const resetButton = document.getElementById('reset-button');
 
-// --- Initialization ---
-function init() {
-    // 1. Scene Setup
-    scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x000000); // Pitch black night
-    // Add Exp2 Fog for a dark horror night
-    scene.fog = new THREE.FogExp2(0x000000, CONFIG.fogDensity); // Playable dark fog
-
-    // 2. Camera Setup (Full Screen 1st-person)
-    camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.005, 100);
-    initAudio(camera, scene);
-
-    // 3. Renderer Setup
-    canvas = document.getElementById('game-canvas');
-    renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true, powerPreference: "high-performance" });
-    renderer.setSize(window.innerWidth, window.innerHeight);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.1; // Balanced exposure to prevent color blowout
-
-    // Get max anisotropy supported (capped at 4 for high FPS performance)
-    maxAnisotropy = Math.min(renderer.capabilities.getMaxAnisotropy(), 4);
-
-    // 3b. Minimap Renderer & Camera Setup
-    const minimapWebglCanvas = document.getElementById('minimap-webgl-canvas');
-    if (minimapWebglCanvas) {
-        // Orthographic camera covering 35cm viewSize centered on player
-        minimapCamera = new THREE.OrthographicCamera(-0.175, 0.175, 0.175, -0.175, 0.01, 10);
-        minimapCamera.position.set(0, 2.0, 0);
-        minimapCamera.lookAt(0, 0, 0);
-
-        minimapRenderer = new THREE.WebGLRenderer({ 
-            canvas: minimapWebglCanvas, 
-            antialias: true,
-            alpha: false 
-        });
-        minimapRenderer.setSize(120, 120);
-        minimapRenderer.shadowMap.enabled = true;
-        minimapRenderer.shadowMap.type = THREE.PCFSoftShadowMap;
-        minimapRenderer.toneMapping = THREE.ACESFilmicToneMapping;
-        minimapRenderer.toneMappingExposure = 1.1;
-    }
-
-    minimapHudCanvas = document.getElementById('minimap-hud-canvas');
-    if (minimapHudCanvas) {
-        minimapHudCtx = minimapHudCanvas.getContext('2d');
-    }
-
-    // 6. Loading Manager & Loaders Setup (Declared early to prevent ReferenceError)
-    const loadingManager = new THREE.LoadingManager();
-    
-    loadingManager.onProgress = (url, itemsLoaded, itemsTotal) => {
-        const progress = Math.round((itemsLoaded / itemsTotal) * 100);
-        loadingBar.style.width = `${progress}%`;
-        loadingText.innerText = `Loading: ${progress}%`;
-        
-        // Show file basename
-        const filename = url.split('/').pop().split('?')[0];
-        loadingFile.innerText = `Loading asset: ${filename}`;
-    };
-
-    loadingManager.onLoad = () => {
-        console.log("All assets loaded successfully.");
-        // Hide loading screen and show start screen
-        loadingScreen.classList.add('hidden');
-        startScreen.classList.remove('hidden');
-    };
-
-    loadingManager.onError = (url) => {
-        console.error('Error loading asset:', url);
-        loadingFile.innerText = `Error loading: ${url.split('/').pop()}`;
-    };
-
-    // 7. Load Textures
-    const textureLoader = new THREE.TextureLoader(loadingManager);
-    const groundDiff = textureLoader.load('forest_ground_texture/textures/forest_ground_04_diff_1k.jpg');
-    const groundNor = textureLoader.load('forest_ground_texture/textures/forest_ground_04_nor_gl_1k.jpg');
-    const groundRough = textureLoader.load('forest_ground_texture/textures/forest_ground_04_rough_1k.jpg');
-    const groundAO = textureLoader.load('forest_ground_texture/textures/forest_ground_04_ao_1k.jpg');
-
-    [groundDiff, groundNor, groundRough, groundAO].forEach(tex => {
-        tex.wrapS = THREE.RepeatWrapping;
-        tex.wrapT = THREE.RepeatWrapping;
-        tex.repeat.set(16, 16); // Tile 16x16 times for sharp close-up resolution
-        tex.anisotropy = maxAnisotropy; // Maximum texture resolution at angles
-    });
-    groundDiff.colorSpace = THREE.SRGBColorSpace;
-
-    // 8. Load Assets
-    gltfLoader = new GLTFLoader(loadingManager);
-
-    // 5. Lighting
-    // Faint slate-blue ambient light so outlines are visible in the dark
-    ambientLight = new THREE.AmbientLight(0x0e0e14, CONFIG.ambientLightIntensity);
-    scene.add(ambientLight);
-
-    // Modern Flashlight Setup (SpotLight - soft warm light to preserve leaf/grass color)
-    torchLight = new THREE.SpotLight(0xfff8ee, 1.0, 4.0, Math.PI / 5.0, 0.4, 1.5); 
-    torchLight.castShadow = true;
-    torchLight.shadow.mapSize.width = 1024; // Optimized for high FPS rendering
-    torchLight.shadow.mapSize.height = 1024;
-    torchLight.shadow.camera.near = 0.005;
-    torchLight.shadow.camera.far = 4.0;
-    torchLight.shadow.bias = -0.0005;
-    // Spotlight target pointing tilted forward
-    torchTarget = new THREE.Object3D();
-
-    // Create and attach the sleek, dark slate-blue procedural flashlight
-    createProceduralFlashlight();
-
-    // Load Map
-    gltfLoader.load('leaves_in_the_garden.glb', (gltf) => {
-        mapModel = gltf.scene;
-        collidableMeshes = [];
-        const rootNode = mapModel.getObjectByName("RootNode");
-        if (rootNode) {
-            let childIdx = 0;
-            rootNode.children.forEach((child) => {
-                // Assign a unique persistent name based on children array index to handle duplicate names in GLTF
-                child.name = child.name + "_" + childIdx;
-                childIdx++;
-
-                child.traverse((sub) => {
-                    if (sub.isMesh) {
-                        sub.castShadow = true;
-                        sub.receiveShadow = true;
-                        
-                        // Fix alpha sorting / depth buffer overlap issues for leaves/grass
-                        const fixMaterial = (mat) => {
-                            if (mat.transparent) {
-                                mat.depthWrite = true;
-                                mat.alphaTest = 0.5; // Discard pixels below 0.5 alpha to write depth correctly
-                                mat.needsUpdate = true;
-                            }
-                            mat.shadowSide = THREE.DoubleSide;
-                            
-                            // High-quality gloss and anisotropy updates for premium looks
-                            mat.roughness = 0.55; 
-                            mat.metalness = 0.05;
-                            if (mat.map) mat.map.anisotropy = maxAnisotropy;
-                            if (mat.normalMap) mat.normalMap.anisotropy = maxAnisotropy;
-                        };
-                        if (Array.isArray(sub.material)) {
-                            sub.material.forEach(fixMaterial);
-                        } else if (sub.material) {
-                            fixMaterial(sub.material);
-                        }
-                    }
-                });
-                
-                // Exclude grass and micro plants to prevent standing in the air
-                const name = child.name.toLowerCase();
-                const isGround = name.includes('ground');
-                // Match all leaf meshes (contain 's_list' even if they have 'forest' prefixes)
-                const isLeaf = name.includes('s_list') && !name.includes('plants');
-                
-                // Only add the ground mesh to collidableMeshes so the player walks smoothly on the ground floor 
-                // and doesn't glitch/snap up onto the leaf canopy above them!
-                if (isGround) {
-                    collidableMeshes.push(child);
-                }
-
-                // Apply forest ground texture to the ground mesh
-                if (isGround) {
-                    child.traverse((sub) => {
-                        if (sub.isMesh) {
-                            sub.material = new THREE.MeshStandardMaterial({
-                                map: groundDiff,
-                                normalMap: groundNor,
-                                roughnessMap: groundRough,
-                                aoMap: groundAO,
-                                roughness: 0.9,
-                                metalness: 0.05
-                            });
-                            sub.material.needsUpdate = true;
-                        }
-                    });
-                }
-            });
-        }
-        scene.add(mapModel);
-        
-        // Play map animations (like moving leaves/grass)
-        if (gltf.animations && gltf.animations.length > 0) {
-            mapMixer = new THREE.AnimationMixer(mapModel);
-            gltf.animations.forEach((clip) => {
-                mapMixer.clipAction(clip).play();
-            });
-            console.log("Map animations playing:", gltf.animations.length);
-        }
-        
-        // Get center of map dynamically to handle shifted origins
-        const mapBox = new THREE.Box3().setFromObject(mapModel);
-        const mapCenter = new THREE.Vector3();
-        mapBox.getCenter(mapCenter);
-        mapCenterX = mapCenter.x;
-        mapCenterZ = mapCenter.z;
-        console.log("Dynamically detected map center:", mapCenterX, mapCenterZ);
-
-        // Apply custom editor map overrides (positions, rotations, scales of leaves)
-        applyMapOverrides(mapModel);
-
-        // Find safe spawn point based on map center & bounds
-        calculateSpawnPoint();
-        resetPlayerPosition();
-        
-        // Snap campfire once map collisions are loaded
-        snapCampfireToGround();
-    });
-
-    // --- Procedural Avatar (all white, animated) ---
-    {
-        playerGroup = new THREE.Group();
-        scene.add(playerGroup);
-
-        buildProceduralAvatar(playerGroup, true);
-
-        // Position first-person camera at eye level
-        camera.position.set(0, CONFIG.playerHeight * 0.95, 0);
-        camera.rotation.set(0, 0, 0);
-        playerGroup.add(camera);
-
-        resetPlayerPosition();
-        spawnRedEyes();
-    }
-
-    // Load Campfire Model at map center
-    gltfLoader.load('camp_fire.glb', (gltf) => {
-        campfireModel = gltf.scene;
-        
-        // Scale campfire to fit micro scale (0.029m / 2.9cm - slightly larger than character)
-        const box = new THREE.Box3().setFromObject(campfireModel);
-        const size = new THREE.Vector3();
-        box.getSize(size);
-        const maxDim = Math.max(size.x, size.z);
-        const scaleFactor = 0.029 / maxDim;
-        campfireModel.scale.set(scaleFactor, scaleFactor, scaleFactor);
-        
-        // Position at (-0.15, 0.0) clear of leaf canopy and dirt mounds
-        const x = -0.15;
-        const z = 0.0;
-        const ray = new THREE.Raycaster(new THREE.Vector3(x, 10, z), new THREE.Vector3(0, -1, 0));
-        const groundMeshes = collidableMeshes.filter(m => m.name.toLowerCase().includes('ground'));
-        const hits = ray.intersectObjects(groundMeshes, true);
-        let y = hits.length > 0 ? hits[0].point.y : 0.015;
-        
-        campfireModel.position.set(x, y + 0.025, z); // Lifted by 7.5mm so stones are fully visible
-        scene.add(campfireModel);
-        
-        campfireModel.traverse(child => {
-            if (child.isMesh) {
-                child.castShadow = true;
-                child.receiveShadow = true;
-            }
-        });
-        
-        setupCampfireLight(x, y + 0.015, z);
-        setupCampfireQuarksParticles(x, y + 0.002, z);
-        
-        // Apply custom editor campfire overrides (if moved in editor)
-        applyCampfireOverrides();
-
-        // Ensure snap is correct once all assets are loaded
-        snapCampfireToGround();
-
-        // Re-calculate spawn point and snap player beside the loaded campfire
-        calculateSpawnPoint();
-        if (playerGroup) {
-            playerGroup.position.copy(spawnPosition);
-            console.log("Teleported player beside campfire at:", playerGroup.position);
-        }
-    }, undefined, (error) => {
-        console.error("Failed to load camp_fire.glb:", error);
-    });
-
-    // 8. Event Listeners
-    window.addEventListener('resize', onWindowResize);
-    window.addEventListener('keydown', (e) => { 
-        keys[e.key.toLowerCase()] = true; 
-        
-        // Slot Hotbar selection (1-9)
-        if (e.key >= '1' && e.key <= '9') {
-            selectSlot(parseInt(e.key));
-        }
-
-        // V key toggles fly mode
-        if (e.key.toLowerCase() === 'v') {
-            flyMode = !flyMode;
-            console.log("Fly mode toggled:", flyMode);
-            const flyStatus = document.getElementById('fly-status') || createFlyStatusUI();
-            flyStatus.innerText = flyMode ? "FLY MODE ACTIVE [WASD + Space/Shift]" : "";
-            // Clear velocities when toggling fly mode
-            verticalVelocity = 0;
-        }
-
-        // C key toggles day mode
-        if (e.key.toLowerCase() === 'c') {
-            dayMode = !dayMode;
-            updateTimeOfDay();
-        }
-
-        // Flashlight rotation debug controls (Press K/L/M to adjust live)
-        if (flashlightGLTF) {
-            if (e.key.toLowerCase() === 'k') {
-                flashlightGLTF.rotation.x += 0.087; // +5 degrees
-                printFlashlightRotation();
-            }
-            if (e.key.toLowerCase() === 'l') {
-                flashlightGLTF.rotation.y += 0.087;
-                printFlashlightRotation();
-            }
-            if (e.key.toLowerCase() === 'm') {
-                flashlightGLTF.rotation.z += 0.087;
-                printFlashlightRotation();
-            }
-        }
-    });
-    window.addEventListener('keyup', (e) => { 
-        keys[e.key.toLowerCase()] = false; 
-    });
-
-    function showSplitOverlays(show) {
-        const divider = document.querySelector('.split-divider');
-        const labels = document.querySelectorAll('.viewport-label');
-        if (divider) {
-            divider.classList.add('hidden');
-        }
-        labels.forEach(label => {
-            label.classList.add('hidden');
-        });
-    }
-
-    // Custom Pointer Lock Events for smooth looking without buttons held (supports mobile bypass)
-    startButton.addEventListener('click', (e) => {
-        e.stopPropagation();
-        unlockAudio();
-        if (isTouchDevice) {
-            startScreen.classList.add('hidden');
-            gameHud.classList.remove('hidden');
-            document.getElementById('hotbar').classList.remove('hidden');
-            document.getElementById('coords-display').classList.remove('hidden');
-            showSplitOverlays(true);
-            clock.getDelta(); // reset clock delta
-        } else {
-            const promise = canvas.requestPointerLock();
-            if (promise && promise.catch) {
-                promise.catch((err) => {
-                    console.warn("Pointer lock request blocked or deferred:", err);
-                });
-            }
-        }
-    });
-
-    document.addEventListener('pointerlockchange', () => {
-        if (document.pointerLockElement === canvas) {
-            startScreen.classList.add('hidden');
-            gameHud.classList.remove('hidden');
-            document.getElementById('hotbar').classList.remove('hidden');
-            document.getElementById('coords-display').classList.remove('hidden');
-            const stam = document.getElementById('stamina-bar-container');
-            if (stam) stam.classList.remove('hidden');
-            showSplitOverlays(true);
-            unlockAudio();
-            clock.getDelta(); // reset clock delta
-        } else {
-            // Clear all key presses to prevent stuck movement on resume
-            for (let key in keys) {
-                keys[key] = false;
-            }
-            startScreen.classList.remove('hidden');
-            gameHud.classList.add('hidden');
-            document.getElementById('hotbar').classList.add('hidden');
-            document.getElementById('coords-display').classList.add('hidden');
-            const stam = document.getElementById('stamina-bar-container');
-            if (stam) stam.classList.add('hidden');
-            showSplitOverlays(false);
-            
-            const title = startScreen.querySelector('.main-title');
-            title.innerText = "Game Paused";
-            const btn = startScreen.querySelector('#start-button');
-            btn.innerText = "RESUME";
-        }
-    });
-
-    document.addEventListener('mousemove', (e) => {
-        if (document.pointerLockElement === canvas) {
-            // Increased mouse looking sensitivity (0.0035) for snappy seeker/hider responses
-            targetYaw -= e.movementX * 0.0035;
-            targetPitch -= e.movementY * 0.0035;
-            targetPitch = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, targetPitch));
-        }
-    });
-
-    resetButton.addEventListener('click', (e) => {
-        e.stopPropagation();
-        resetPlayerPosition();
-    });
-
-    // Auto-select Flashlight (slot 1) at start
-    selectSlot(1);
-
-    // Setup client-side deterministic ambient particles (fireflies, swarming bugs)
-    spawnAmbientParticles();
-
-    // Setup creepy spider cocoon egg sacs
-    spawnSpookyCocoons();
-
-    // Initialize left and right footprint textures
-    footprintLeftTexture = createFootprintTexture(true);
-    footprintRightTexture = createFootprintTexture(false);
-
-    // Initialize mobile controls overlay if on a touch device
-    initMobileControls();
-
-    // Connect to multiplayer server
-    initMultiplayer();
-
-    // Start rendering loop!
-    animate();
-}
-
-// --- Spawn logic ---
-function calculateSpawnPoint() {
-    let targetX = -0.15;
-    let targetZ = 0.0;
-    if (campfireModel) {
-        targetX = campfireModel.position.x;
-        targetZ = campfireModel.position.z;
-    }
-    // Spawn right next to the campfire (0.016m / 1.6cm, very close!)
-    spawnPosition.set(targetX + 0.016, 0.015, targetZ + 0.016);
-    console.log("Calculated dynamic spawn position beside campfire:", spawnPosition);
-}
-
-// --- Ambient Deterministic Particle Simulation ---
-// Simple seedable pseudo-random number generator (Mulberry32) for 100% synchronized layouts
-function createDeterministicRandom(seed) {
-    return function() {
-        let t = seed += 0x6D2B79F5;
-        t = Math.imul(t ^ (t >>> 15), t | 1);
-        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    }
-}
-
-function spawnAmbientParticles() {
-    const random = createDeterministicRandom(8888); // Fixed seed for matching coords
-
-    // 1. Fireflies Setup
-    const fireflyCount = 60; // Increased count for density
-    const fireflyGeom = new THREE.SphereGeometry(0.0015, 6, 6);
-    const fireflyMat = new THREE.MeshBasicMaterial({
-        color: 0xdfff80, // Bright glowing green-yellow firefly color
-        transparent: true,
-        opacity: 0.95,
-        fog: false // Disable fog so they glow in the distance!
-    });
-
-    for (let i = 0; i < fireflyCount; i++) {
-        const mesh = new THREE.Mesh(fireflyGeom, fireflyMat);
-        scene.add(mesh);
-
-        // Base coordinates in garden (concentrated around dynamic map center)
-        const baseX = mapCenterX + (random() - 0.5) * 10.0;
-        const baseY = 0.05 + random() * 0.8;
-        const baseZ = mapCenterZ + (random() - 0.5) * 10.0;
-
-        fireflies.push({
-            mesh: mesh,
-            baseX: baseX,
-            baseY: baseY,
-            baseZ: baseZ,
-            freqX: 0.4 + random() * 0.6,
-            freqY: 0.3 + random() * 0.5,
-            freqZ: 0.4 + random() * 0.6,
-            ampX: 0.3 + random() * 0.6,
-            ampY: 0.15 + random() * 0.25,
-            ampZ: 0.3 + random() * 0.6,
-            phaseX: random() * Math.PI * 2,
-            phaseY: random() * Math.PI * 2,
-            phaseZ: random() * Math.PI * 2
-        });
-    }
-
-    // 2. Swarming Bugs Setup (3 swarm groups shifted near player spawn (0,0) for visibility)
-    const swarmCount = 3;
-    const bugsPerSwarm = 20;
-    const bugGeom = new THREE.SphereGeometry(0.0010, 4, 4); // Increased size to 1.0mm for visibility
-    const bugMat = new THREE.MeshBasicMaterial({ color: 0x111111 });
-
-    const swarmCenters = [
-        new THREE.Vector3(mapCenterX + 0.12, 0.04, mapCenterZ + 0.15),
-        new THREE.Vector3(mapCenterX - 0.22, 0.05, mapCenterZ - 0.2),
-        new THREE.Vector3(mapCenterX + 0.2, 0.06, mapCenterZ - 0.35)
-    ];
-
-    for (let s = 0; s < swarmCount; s++) {
-        const center = swarmCenters[s];
-        const bugs = [];
-
-        for (let b = 0; b < bugsPerSwarm; b++) {
-            const mesh = new THREE.Mesh(bugGeom, bugMat);
-            scene.add(mesh);
-
-            bugs.push({
-                mesh: mesh,
-                freqX: 1.8 + random() * 3.5,
-                freqY: 2.2 + random() * 3.0,
-                freqZ: 1.8 + random() * 3.5,
-                ampX: 0.04 + random() * 0.12,
-                ampY: 0.03 + random() * 0.08,
-                ampZ: 0.04 + random() * 0.12,
-                phaseX: random() * Math.PI * 2,
-                phaseY: random() * Math.PI * 2,
-                phaseZ: random() * Math.PI * 2
-            });
-        }
-
-        bugSwarms.push({
-            center: center,
-            bugs: bugs
-        });
-    }
-}
-
-function updateAmbientParticles() {
-    // Synchronize to absolute Date milliseconds so all hiders & seekers see identical coords
-    const t = Date.now() / 1000;
-
-    // 1. Update Fireflies
-    fireflies.forEach(f => {
-        f.mesh.position.x = f.baseX + Math.sin(t * f.freqX + f.phaseX) * f.ampX;
-        f.mesh.position.y = f.baseY + Math.cos(t * f.freqY + f.phaseY) * f.ampY;
-        f.mesh.position.z = f.baseZ + Math.sin(t * f.freqZ + f.phaseZ) * f.ampZ;
-    });
-
-    // 2. Update Swarming Bugs
-    bugSwarms.forEach(s => {
-        s.bugs.forEach(b => {
-            b.mesh.position.x = s.center.x + Math.sin(t * b.freqX + b.phaseX) * b.ampX;
-            b.mesh.position.y = s.center.y + Math.cos(t * b.freqY + b.phaseY) * b.ampY;
-            b.mesh.position.z = s.center.z + Math.sin(t * b.freqZ + b.phaseZ) * b.ampZ;
-        });
-    });
-}
-
-function resetPlayerPosition() {
-    if (playerGroup) {
-        playerGroup.position.copy(spawnPosition);
-        verticalVelocity = 0;
-        isGrounded = true;
-        
-        // Reset look rotations to face directly at the campfire (diagonal look heading!)
-        yaw = -3 * Math.PI / 4;
-        pitch = -0.3; // look slightly downwards at the fire
-        targetYaw = yaw;
-        targetPitch = pitch;
-        
-        playerGroup.rotation.y = yaw; // Apply yaw directly to body
-        camera.rotation.order = 'YXZ';
-        camera.rotation.set(pitch, 0, 0); // Keep camera local yaw at 0 to fix inverted movement!
-        
-        selectSlot(1); // Select flashlight by default
-    }
-}
-
-// --- Window resizing ---
-function onWindowResize() {
-    camera.aspect = window.innerWidth / window.innerHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
-}
-
-// --- Crossfade Animations ---
-function fadeToAction(nextAction, duration = 0.25) {
-    if (nextAction && currentAction !== nextAction) {
-        const prevAction = currentAction;
-        currentAction = nextAction;
-        
-        currentAction.reset();
-        currentAction.setEffectiveTimeScale(1);
-        currentAction.setEffectiveWeight(1);
-        currentAction.crossFadeFrom(prevAction, duration, true);
-        currentAction.play();
-    } else if (!currentAction && nextAction) {
-        currentAction = nextAction;
-        currentAction.play();
-    }
-}
-
-// ─── Procedural Avatar Builder ───────────────────────────────────────────────
+// --- Procedural Stickman Avatar Helper Functions ---
 const WHITE = 0xffffff;
 const L = THREE.MathUtils.lerp;
 
@@ -772,6 +184,14 @@ function box(w, h, d, color) {
     return m;
 }
 
+function makeJoint(radius) {
+    const group = new THREE.Group();
+    const mesh = sphere(radius, WHITE, 0.8);
+    group.add(mesh);
+    return group;
+}
+
+// --- Build Procedural Stickman Avatar ---
 function buildProceduralAvatar(parentGroup, storeParts) {
     const root = new THREE.Group();
     const bp = {};
@@ -916,6 +336,7 @@ function buildProceduralAvatar(parentGroup, storeParts) {
     return { root, bodyParts: bp };
 }
 
+// --- IK Setters ---
 function setLeg(hipPivot, kneePivot, anklePivot, hipX, kneeX, ankleX, speed = 0.14) {
     hipPivot.rotation.x = L(hipPivot.rotation.x, hipX, speed);
     kneePivot.rotation.x = L(kneePivot.rotation.x, kneeX, speed);
@@ -927,6 +348,7 @@ function setArm(shoulderPivot, elbowPivot, shX, shZ, elX, speed = 0.14) {
     elbowPivot.rotation.x = L(elbowPivot.rotation.x, elX, speed);
 }
 
+// --- Stickman Animation State Machine ---
 function animateCharacter(deltaTime, isMoving) {
     if (!bodyParts.lHipPivot) return;
     const bp = bodyParts;
@@ -939,7 +361,8 @@ function animateCharacter(deltaTime, isMoving) {
     if (!grounded && rising) animState = 'jump';
     else if (!grounded && falling) animState = 'fall';
     else if (landTimer > 0) animState = 'land';
-    else if (isMoving) animState = 'walk';
+    else if (isMoving && !localIsSprintingActive) animState = 'walk';
+    else if (isMoving && localIsSprintingActive) animState = 'sprint';
     else animState = 'idle';
 
     if (landTimer > 0) landTimer -= deltaTime;
@@ -951,6 +374,8 @@ function animateCharacter(deltaTime, isMoving) {
     if (bp.torsoGroup) bp.torsoGroup.rotation.z = turnLean;
 
     const TB = 1.10;
+    const torchEquipped = selectedSlot === 1;
+
     if (animState === 'idle') {
         walkTime += deltaTime * 1.4;
         const breath = Math.sin(walkTime * 0.85) * 0.012;
@@ -958,7 +383,7 @@ function animateCharacter(deltaTime, isMoving) {
         if (bp.torsoGroup) { bp.torsoGroup.position.y = L(bp.torsoGroup.position.y, TB + breath, 0.08); bp.torsoGroup.rotation.x = L(bp.torsoGroup.rotation.x, 0.02, 0.05); }
         if (bp.headGroup) bp.headGroup.rotation.x = L(bp.headGroup.rotation.x, -sway * 0.3, 0.06);
         setArm(bp.lShoulderPivot, bp.lElbowPivot, 0.05, -0.08 + sway, 0.12, 0.06);
-        setArm(bp.rShoulderPivot, bp.rElbowPivot, 0.05, 0.08 - sway, 0.12, 0.06);
+        if (!torchEquipped) setArm(bp.rShoulderPivot, bp.rElbowPivot, 0.05, 0.08 - sway, 0.12, 0.06);
         setLeg(bp.lHipPivot, bp.lKneePivot, bp.lAnklePivot, 0, 0, 0, 0.08);
         setLeg(bp.rHipPivot, bp.rKneePivot, bp.rAnklePivot, 0, 0, 0, 0.08);
     } else if (animState === 'walk') {
@@ -975,18 +400,34 @@ function animateCharacter(deltaTime, isMoving) {
         setLeg(bp.lHipPivot, bp.lKneePivot, bp.lAnklePivot, lHipAngle, lKneeAngle, lAnkle, 0.25);
         setLeg(bp.rHipPivot, bp.rKneePivot, bp.rAnklePivot, rHipAngle, rKneeAngle, rAnkle, 0.25);
         setArm(bp.lShoulderPivot, bp.lElbowPivot, -Math.sin(t) * 0.5, -0.08, 0.6, 0.25);
-        setArm(bp.rShoulderPivot, bp.rElbowPivot, -Math.sin(t + Math.PI) * 0.5, 0.08, 0.6, 0.25);
+        if (!torchEquipped) setArm(bp.rShoulderPivot, bp.rElbowPivot, -Math.sin(t + Math.PI) * 0.5, 0.08, 0.6, 0.25);
         if (bp.headGroup) bp.headGroup.position.y = L(bp.headGroup.position.y, 0.68 + bob, 0.2);
+    } else if (animState === 'sprint') {
+        walkTime += deltaTime * 12.0;
+        const t = walkTime;
+        const bob = Math.abs(Math.sin(t * 2)) * 0.05;
+        if (bp.torsoGroup) { bp.torsoGroup.position.y = L(bp.torsoGroup.position.y, TB - bob * 0.8, 0.2); bp.torsoGroup.rotation.x = L(bp.torsoGroup.rotation.x, 0.12, 0.15); }
+        const lHipAngle = Math.sin(t * 1.5) * 1.0;
+        const rHipAngle = Math.sin(t * 1.5 + Math.PI) * 1.0;
+        const lKneeAngle = Math.max(0, -Math.sin(t * 1.5)) * 1.3;
+        const rKneeAngle = Math.max(0, -Math.sin(t * 1.5 + Math.PI)) * 1.3;
+        const lAnkle = Math.sin(t * 1.5) * 0.4;
+        const rAnkle = Math.sin(t * 1.5 + Math.PI) * 0.4;
+        setLeg(bp.lHipPivot, bp.lKneePivot, bp.lAnklePivot, lHipAngle, lKneeAngle, lAnkle, 0.35);
+        setLeg(bp.rHipPivot, bp.rKneePivot, bp.rAnklePivot, rHipAngle, rKneeAngle, rAnkle, 0.35);
+        setArm(bp.lShoulderPivot, bp.lElbowPivot, -Math.sin(t * 1.5) * 0.8, -0.15, 1.0, 0.5);
+        if (!torchEquipped) setArm(bp.rShoulderPivot, bp.rElbowPivot, -Math.sin(t * 1.5 + Math.PI) * 0.8, 0.15, 1.0, 0.5);
+        if (bp.headGroup) bp.headGroup.position.y = L(bp.headGroup.position.y, 0.68 + bob, 0.3);
     } else if (animState === 'jump') {
         if (bp.torsoGroup) { bp.torsoGroup.position.y = L(bp.torsoGroup.position.y, 1.18, 0.15); bp.torsoGroup.rotation.x = L(bp.torsoGroup.rotation.x, -0.15, 0.12); }
         setArm(bp.lShoulderPivot, bp.lElbowPivot, -1.2, -0.15, -0.4, 0.18);
-        setArm(bp.rShoulderPivot, bp.rElbowPivot, -1.2, 0.15, -0.4, 0.18);
+        if (!torchEquipped) setArm(bp.rShoulderPivot, bp.rElbowPivot, -1.2, 0.15, -0.4, 0.18);
         setLeg(bp.lHipPivot, bp.lKneePivot, bp.lAnklePivot, -0.5, 1.1, -0.3, 0.18);
         setLeg(bp.rHipPivot, bp.rKneePivot, bp.rAnklePivot, -0.5, 1.1, -0.3, 0.18);
     } else if (animState === 'fall') {
         if (bp.torsoGroup) bp.torsoGroup.rotation.x = L(bp.torsoGroup.rotation.x, 0.25, 0.08);
         setArm(bp.lShoulderPivot, bp.lElbowPivot, 0.2, -1.2, 0.3, 0.10);
-        setArm(bp.rShoulderPivot, bp.rElbowPivot, 0.2, 1.2, 0.3, 0.10);
+        if (!torchEquipped) setArm(bp.rShoulderPivot, bp.rElbowPivot, 0.2, 1.2, 0.3, 0.10);
         setLeg(bp.lHipPivot, bp.lKneePivot, bp.lAnklePivot, 0.2, 0.5, 0, 0.10);
         setLeg(bp.rHipPivot, bp.rKneePivot, bp.rAnklePivot, 0.2, 0.5, 0, 0.10);
     } else if (animState === 'land') {
@@ -994,15 +435,834 @@ function animateCharacter(deltaTime, isMoving) {
         const squat = Math.sin(t * Math.PI) * 0.18;
         if (bp.torsoGroup) { bp.torsoGroup.position.y = L(bp.torsoGroup.position.y, TB - squat * 0.5, 0.4); bp.torsoGroup.rotation.x = L(bp.torsoGroup.rotation.x, squat * 0.5, 0.3); }
         setArm(bp.lShoulderPivot, bp.lElbowPivot, 0.4, -0.15, 0.5, 0.3);
-        setArm(bp.rShoulderPivot, bp.rElbowPivot, 0.4, 0.15, 0.5, 0.3);
+        if (!torchEquipped) setArm(bp.rShoulderPivot, bp.rElbowPivot, 0.4, 0.15, 0.5, 0.3);
         setLeg(bp.lHipPivot, bp.lKneePivot, bp.lAnklePivot, 0.5, 0.9, -0.2, 0.3);
         setLeg(bp.rHipPivot, bp.rKneePivot, bp.rAnklePivot, 0.5, 0.9, -0.2, 0.3);
     }
+
+    // When torch equipped, hold right arm forward toward camera (torch is held in front) using dynamic 3D IK
+    if (torchEquipped && animState !== 'sprint' && torchMesh) {
+        // Group the hand directly to the torch to ensure 100% zero-gap alignment
+        if (bp.rHand && bp.rHand.parent !== torchMesh) {
+            torchMesh.add(bp.rHand);
+            // Position hand exactly on the flashlight handle
+            bp.rHand.position.set(0.0, 0.0, -0.001);
+            bp.rHand.rotation.set(0.0, 0.0, 0.1); // Natural hand orientation
+            bp.rHand.scale.set(0.035, 0.035, 0.035); // Matches character scale
+        }
+
+        // Ensure world matrices are fully updated so world positions are accurate
+        if (bp.torsoGroup) bp.torsoGroup.updateMatrixWorld(true);
+        if (camera) camera.updateMatrixWorld(true);
+        torchMesh.updateMatrixWorld(true);
+        if (bp.rHand) bp.rHand.updateMatrixWorld(true);
+
+        const L1 = 0.52; // Upper arm length
+        const L2 = 0.46; // Forearm length
+        const handWorldPos = new THREE.Vector3();
+        if (bp.rHand) {
+            bp.rHand.getWorldPosition(handWorldPos);
+        } else {
+            torchMesh.getWorldPosition(handWorldPos);
+        }
+
+        // Map world position of hand to torso coordinate space
+        const targetLocal = bp.torsoGroup.worldToLocal(handWorldPos.clone());
+        const v = new THREE.Vector3().subVectors(targetLocal, bp.rShoulderPivot.position);
+        const d = THREE.MathUtils.clamp(v.length(), 0.06, L1 + L2);
+
+        const dir = v.clone().normalize();
+        // positive rotation X rotates towards negative Z (forward)
+        const theta_x = Math.asin(THREE.MathUtils.clamp(-dir.z, -1, 1));
+        const theta_z = Math.atan2(dir.x, -dir.y);
+
+        // Law of Cosines for elbow angle
+        const cosElbow = (d * d - L1 * L1 - L2 * L2) / (2 * L1 * L2);
+        const elbowAngle = Math.acos(THREE.MathUtils.clamp(cosElbow, -1, 1));
+
+        // Angle offset for upper arm to reach target with bent elbow
+        const cosAlpha = (L1 * L1 + d * d - L2 * L2) / (2 * L1 * d);
+        const alpha = Math.acos(THREE.MathUtils.clamp(cosAlpha, -1, 1));
+
+        const shX = theta_x - alpha;
+        const shZ = theta_z;
+        const elX = elbowAngle;
+
+        bp.rShoulderPivot.rotation.x = shX;
+        bp.rShoulderPivot.rotation.z = shZ;
+        bp.rElbowPivot.rotation.x = elX;
+    } else {
+        // If not holding torch or if sprinting, restore hand to its natural wrist parent
+        if (bp.rHand && bp.rHand.parent !== bp.rWristPivot) {
+            bp.rWristPivot.add(bp.rHand);
+            bp.rHand.position.set(0, 0, 0);
+            bp.rHand.rotation.set(0, 0, 0);
+            bp.rHand.scale.set(1, 1, 1);
+        }
+    }
 }
 
-// ─── End Procedural Avatar ───────────────────────────────────────────────────
+// --- Remote Stickman Avatar Animation ---
+function animateRemoteAvatar(player, deltaTime) {
+    const bp = player.bodyParts;
+    if (!bp || !bp.lHipPivot) return;
+    const isMoving = player.mesh.position.distanceTo(player.targetPosition) > 0.001;
+    const yawDelta = player.targetYaw - player.prevYaw;
+    const twist = THREE.MathUtils.clamp(yawDelta * 15, -0.3, 0.3);
+    player.turnLean = L(player.turnLean || 0, -yawDelta * 18, 0.18);
+    player.prevYaw = player.targetYaw;
 
-// --- Main Loop ---
+    if (bp.torsoGroup) {
+        bp.torsoGroup.rotation.y = twist;
+        bp.torsoGroup.rotation.z = player.turnLean;
+    }
+
+    player.walkTime = (player.walkTime || 0) + deltaTime * (isMoving ? 7.5 : 1.4);
+    const t = player.walkTime;
+
+    if (isMoving) {
+        const bob = Math.abs(Math.sin(t)) * 0.03;
+        if (bp.torsoGroup) bp.torsoGroup.position.y = L(bp.torsoGroup.position.y, 1.10 - bob * 0.5, 0.15);
+        const lHip = Math.sin(t) * 0.7;
+        const rHip = Math.sin(t + Math.PI) * 0.7;
+        const lKnee = Math.max(0, -Math.sin(t)) * 0.9;
+        const rKnee = Math.max(0, -Math.sin(t + Math.PI)) * 0.9;
+        bp.lHipPivot.rotation.x = L(bp.lHipPivot.rotation.x, lHip, 0.25);
+        bp.lKneePivot.rotation.x = L(bp.lKneePivot.rotation.x, lKnee, 0.25);
+        bp.lAnklePivot.rotation.x = L(bp.lAnklePivot.rotation.x, Math.sin(t) * 0.25, 0.25);
+        bp.rHipPivot.rotation.x = L(bp.rHipPivot.rotation.x, rHip, 0.25);
+        bp.rKneePivot.rotation.x = L(bp.rKneePivot.rotation.x, rKnee, 0.25);
+        bp.rAnklePivot.rotation.x = L(bp.rAnklePivot.rotation.x, Math.sin(t + Math.PI) * 0.25, 0.25);
+        if (bp.lShoulderPivot) {
+            bp.lShoulderPivot.rotation.x = L(bp.lShoulderPivot.rotation.x, -Math.sin(t) * 0.5, 0.25);
+        }
+        if (bp.rShoulderPivot && !player.isFlashlightOn) {
+            bp.rShoulderPivot.rotation.x = L(bp.rShoulderPivot.rotation.x, -Math.sin(t + Math.PI) * 0.5, 0.25);
+            bp.rShoulderPivot.rotation.z = L(bp.rShoulderPivot.rotation.z, 0.08, 0.25);
+            bp.rElbowPivot.rotation.x = L(bp.rElbowPivot.rotation.x, 0.6, 0.25);
+        }
+    } else {
+        if (bp.torsoGroup) bp.torsoGroup.position.y = L(bp.torsoGroup.position.y, 1.10, 0.08);
+        bp.lHipPivot.rotation.x = L(bp.lHipPivot.rotation.x, 0, 0.08);
+        bp.rHipPivot.rotation.x = L(bp.rHipPivot.rotation.x, 0, 0.08);
+        bp.lKneePivot.rotation.x = L(bp.lKneePivot.rotation.x, 0, 0.08);
+        bp.rKneePivot.rotation.x = L(bp.rKneePivot.rotation.x, 0, 0.08);
+        if (bp.lShoulderPivot) {
+            bp.lShoulderPivot.rotation.x = L(bp.lShoulderPivot.rotation.x, 0.05, 0.06);
+        }
+        if (bp.rShoulderPivot && !player.isFlashlightOn) {
+            bp.rShoulderPivot.rotation.x = L(bp.rShoulderPivot.rotation.x, 0.05, 0.06);
+            bp.rShoulderPivot.rotation.z = L(bp.rShoulderPivot.rotation.z, 0.08, 0.06);
+            bp.rElbowPivot.rotation.x = L(bp.rElbowPivot.rotation.x, 0.12, 0.06);
+        }
+    }
+
+    // Apply remote IK if flashlight is equipped
+    if (player.isFlashlightOn && bp.rShoulderPivot && bp.rElbowPivot && player.spotlight && player.spotlight.target) {
+        // Force update world matrices for correct position tracking
+        if (bp.torsoGroup) bp.torsoGroup.updateMatrixWorld(true);
+        player.spotlight.target.updateMatrixWorld(true);
+
+        const L1 = 0.52;
+        const L2 = 0.46;
+        const targetWorldPos = new THREE.Vector3();
+        player.spotlight.target.getWorldPosition(targetWorldPos);
+
+        const targetLocal = bp.torsoGroup.worldToLocal(targetWorldPos.clone());
+        // Shift target slightly up and forward relative to torso space
+        targetLocal.y += 0.06;
+        targetLocal.z -= 0.03;
+        const v = new THREE.Vector3().subVectors(targetLocal, bp.rShoulderPivot.position);
+        const d = THREE.MathUtils.clamp(v.length(), 0.06, L1 + L2);
+
+        const dir = v.clone().normalize();
+        const theta_x = Math.asin(THREE.MathUtils.clamp(-dir.z, -1, 1));
+        const theta_z = Math.atan2(dir.x, -dir.y);
+
+        const cosElbow = (d * d - L1 * L1 - L2 * L2) / (2 * L1 * L2);
+        const elbowAngle = Math.acos(THREE.MathUtils.clamp(cosElbow, -1, 1));
+
+        const cosAlpha = (L1 * L1 + d * d - L2 * L2) / (2 * L1 * d);
+        const alpha = Math.acos(THREE.MathUtils.clamp(cosAlpha, -1, 1));
+
+        const shX = theta_x - alpha;
+        const shZ = theta_z;
+        const elX = elbowAngle;
+
+        bp.rShoulderPivot.rotation.x = L(bp.rShoulderPivot.rotation.x, shX, 0.25);
+        bp.rShoulderPivot.rotation.z = L(bp.rShoulderPivot.rotation.z, shZ, 0.25);
+        bp.rElbowPivot.rotation.x = L(bp.rElbowPivot.rotation.x, elX, 0.25);
+    }
+}
+
+// --- Initialization ---
+function init() {
+    // 1. Scene Setup
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x060c14); // Misty dark night
+    // Add Exp2 Fog for a dark horror night
+    scene.fog = new THREE.FogExp2(0x060c14, CONFIG.fogDensity); // Playable dark fog
+
+    // 2. Camera Setup
+    // FPV Camera
+    camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.005, 100);
+
+    initAudio(camera, scene);
+
+    // 3. Renderer Setup
+    canvas = document.getElementById('game-canvas');
+    renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true, powerPreference: "high-performance" });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.1; // Balanced exposure to prevent color blowout
+
+    // Get max anisotropy supported (capped at 4 for high FPS performance)
+    maxAnisotropy = Math.min(renderer.capabilities.getMaxAnisotropy(), 4);
+
+    // 3b. Minimap Renderer & Camera Setup
+    const minimapWebglCanvas = document.getElementById('minimap-webgl-canvas');
+    if (minimapWebglCanvas) {
+        // Orthographic camera covering 35cm viewSize centered on player
+        minimapCamera = new THREE.OrthographicCamera(-0.175, 0.175, 0.175, -0.175, 0.01, 10);
+        minimapCamera.position.set(0, 2.0, 0);
+        minimapCamera.lookAt(0, 0, 0);
+
+        minimapRenderer = new THREE.WebGLRenderer({
+            canvas: minimapWebglCanvas,
+            antialias: true,
+            alpha: false
+        });
+        minimapRenderer.setSize(120, 120);
+        minimapRenderer.shadowMap.enabled = true;
+        minimapRenderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        minimapRenderer.toneMapping = THREE.ACESFilmicToneMapping;
+        minimapRenderer.toneMappingExposure = 1.1;
+    }
+
+    minimapHudCanvas = document.getElementById('minimap-hud-canvas');
+    if (minimapHudCanvas) {
+        minimapHudCtx = minimapHudCanvas.getContext('2d');
+    }
+
+    // 6. Loading Manager & Loaders Setup (Declared early to prevent ReferenceError)
+    const loadingManager = new THREE.LoadingManager();
+
+    loadingManager.onProgress = (url, itemsLoaded, itemsTotal) => {
+        const progress = Math.round((itemsLoaded / itemsTotal) * 100);
+        loadingBar.style.width = `${progress}%`;
+        loadingText.innerText = `Loading: ${progress}%`;
+
+        // Show file basename
+        const filename = url.split('/').pop().split('?')[0];
+        loadingFile.innerText = `Loading asset: ${filename}`;
+    };
+
+    loadingManager.onLoad = () => {
+        console.log("All assets loaded successfully.");
+        // Hide loading screen and show start screen
+        loadingScreen.classList.add('hidden');
+        startScreen.classList.remove('hidden');
+    };
+
+    loadingManager.onError = (url) => {
+        console.error('Error loading asset:', url);
+        loadingFile.innerText = `Error loading: ${url.split('/').pop()}`;
+    };
+
+    // 7. Load Textures
+    const textureLoader = new THREE.TextureLoader(loadingManager);
+    const groundDiff = textureLoader.load('forest_ground_texture/textures/forest_ground_04_diff_1k.jpg');
+    const groundNor = textureLoader.load('forest_ground_texture/textures/forest_ground_04_nor_gl_1k.jpg');
+    const groundRough = textureLoader.load('forest_ground_texture/textures/forest_ground_04_rough_1k.jpg');
+    const groundAO = textureLoader.load('forest_ground_texture/textures/forest_ground_04_ao_1k.jpg');
+
+    [groundDiff, groundNor, groundRough, groundAO].forEach(tex => {
+        tex.wrapS = THREE.RepeatWrapping;
+        tex.wrapT = THREE.RepeatWrapping;
+        tex.repeat.set(16, 16); // Tile 16x16 times for sharp close-up resolution
+        tex.anisotropy = maxAnisotropy; // Maximum texture resolution at angles
+    });
+    groundDiff.colorSpace = THREE.SRGBColorSpace;
+
+    // Add moon sprite in the sky
+    const moonTexture = textureLoader.load('moon.png');
+    const moonMaterial = new THREE.SpriteMaterial({
+        map: moonTexture,
+        transparent: true,
+        opacity: 0.9,
+        depthWrite: false,
+        fog: false,
+        blending: THREE.AdditiveBlending
+    });
+    moonSprite = new THREE.Sprite(moonMaterial);
+    // Correct aspect ratio and scale for distance 80:
+    // Original width 3 at distance ~12.8 corresponds to width 18.75 at distance 80.
+    // Correct height scale is width * (height_pixel / width_pixel) = 18.75 * (607 / 800).
+    moonSprite.scale.set(18.75, 18.75 * (607 / 800), 1);
+    // Position it initially in the direction (0, 8, -10) at distance 80
+    const moonDir = new THREE.Vector3(0, 8, -10).normalize();
+    moonSprite.position.copy(moonDir).multiplyScalar(80);
+    scene.add(moonSprite);
+
+    // Add 16 stars in the sky (procedural glowing circles)
+    const starCanvas = document.createElement('canvas');
+    starCanvas.width = 128;
+    starCanvas.height = 128;
+    const starCtx = starCanvas.getContext('2d');
+    const center = 64;
+    const gradient = starCtx.createRadialGradient(center, center, 0, center, center, 64);
+    gradient.addColorStop(0, 'rgba(255, 255, 255, 1.0)');
+    gradient.addColorStop(0.15, 'rgba(255, 255, 255, 0.9)');
+    gradient.addColorStop(0.4, 'rgba(200, 220, 255, 0.4)');
+    gradient.addColorStop(0.7, 'rgba(150, 180, 255, 0.1)');
+    gradient.addColorStop(1, 'rgba(100, 140, 255, 0.0)');
+    starCtx.fillStyle = gradient;
+    starCtx.beginPath();
+    starCtx.arc(center, center, 64, 0, Math.PI * 2);
+    starCtx.fill();
+    const starTexture = new THREE.CanvasTexture(starCanvas);
+
+    const starPositions = [
+        { x: -5, y: 7, z: -8, scale: 0.12 },
+        { x: 4, y: 9, z: -12, scale: 0.09 },
+        { x: -8, y: 6, z: -15, scale: 0.1 },
+        { x: 7, y: 8, z: -6, scale: 0.07 },
+        { x: -3, y: 10, z: -14, scale: 0.08 },
+        { x: 6, y: 7, z: -11, scale: 0.06 },
+        { x: -9, y: 9, z: -10, scale: 0.11 },
+        { x: 2, y: 11, z: -16, scale: 0.08 },
+        { x: -6, y: 8, z: -5, scale: 0.07 },
+        { x: 9, y: 10, z: -13, scale: 0.09 },
+        { x: -1, y: 12, z: -9, scale: 0.1 },
+        { x: 5, y: 6, z: -17, scale: 0.06 },
+        { x: -7, y: 11, z: -12, scale: 0.08 },
+        { x: 8, y: 9, z: -7, scale: 0.1 },
+        { x: -4, y: 7, z: -18, scale: 0.07 },
+        { x: 3, y: 10, z: -10, scale: 0.09 }
+    ];
+    starPositions.forEach(pos => {
+        const starMaterial = new THREE.SpriteMaterial({
+            map: starTexture,
+            transparent: true,
+            opacity: 1.0,
+            depthWrite: false,
+            fog: false,
+            blending: THREE.AdditiveBlending
+        });
+        const star = new THREE.Sprite(starMaterial);
+        star.scale.set(pos.scale, pos.scale, 1);
+        star.position.set(pos.x, pos.y, pos.z);
+        scene.add(star);
+    });
+
+    // 8. Load Assets
+    gltfLoader = new GLTFLoader(loadingManager);
+
+    // 5. Lighting
+    // Faint slate-blue ambient light so outlines are visible in the dark
+    ambientLight = new THREE.AmbientLight(0x0e0e14, CONFIG.ambientLightIntensity);
+    scene.add(ambientLight);
+
+    // Modern Flashlight Setup (SpotLight - soft warm light to preserve leaf/grass color)
+    torchLight = new THREE.SpotLight(0xfff8ee, 1.0, 4.0, Math.PI / 5.0, 0.4, 1.5);
+    torchLight.castShadow = true;
+    torchLight.shadow.mapSize.width = 1024; // Optimized for high FPS rendering
+    torchLight.shadow.mapSize.height = 1024;
+    torchLight.shadow.camera.near = 0.005;
+    torchLight.shadow.camera.far = 4.0;
+    torchLight.shadow.bias = -0.0005;
+    // Spotlight target pointing tilted forward
+    torchTarget = new THREE.Object3D();
+
+    // Create and attach the sleek, dark slate-blue procedural flashlight
+    createProceduralFlashlight();
+
+    // Load Map
+    gltfLoader.load('leaves_in_the_garden.glb', (gltf) => {
+        mapModel = gltf.scene;
+        collidableMeshes = [];
+        const rootNode = mapModel.getObjectByName("RootNode");
+        if (rootNode) {
+            let childIdx = 0;
+            rootNode.children.forEach((child) => {
+                // Assign a unique persistent name based on children array index to handle duplicate names in GLTF
+                child.name = child.name + "_" + childIdx;
+                childIdx++;
+
+                child.traverse((sub) => {
+                    if (sub.isMesh) {
+                        sub.castShadow = true;
+                        sub.receiveShadow = true;
+
+                        // Fix alpha sorting / depth buffer overlap issues for leaves/grass
+                        const fixMaterial = (mat) => {
+                            if (mat.transparent) {
+                                mat.depthWrite = true;
+                                mat.alphaTest = 0.5; // Discard pixels below 0.5 alpha to write depth correctly
+                                mat.needsUpdate = true;
+                            }
+                            mat.shadowSide = THREE.DoubleSide;
+
+                            // High-quality gloss and anisotropy updates for premium looks
+                            mat.roughness = 0.55;
+                            mat.metalness = 0.05;
+                            if (mat.map) mat.map.anisotropy = maxAnisotropy;
+                            if (mat.normalMap) mat.normalMap.anisotropy = maxAnisotropy;
+                        };
+                        if (Array.isArray(sub.material)) {
+                            sub.material.forEach(fixMaterial);
+                        } else if (sub.material) {
+                            fixMaterial(sub.material);
+                        }
+                    }
+                });
+
+                // Exclude grass and micro plants to prevent standing in the air
+                const name = child.name.toLowerCase();
+                const isGround = name.includes('ground');
+                // Match all leaf meshes (contain 's_list' even if they have 'forest' prefixes)
+                const isLeaf = name.includes('s_list') && !name.includes('plants');
+
+                // Only add the ground mesh to collidableMeshes so the player walks smoothly on the ground floor 
+                // and doesn't glitch/snap up onto the leaf canopy above them!
+                if (isGround) {
+                    collidableMeshes.push(child);
+                }
+
+                // Apply forest ground texture to the ground mesh
+                if (isGround) {
+                    child.traverse((sub) => {
+                        if (sub.isMesh) {
+                            sub.material = new THREE.MeshStandardMaterial({
+                                map: groundDiff,
+                                normalMap: groundNor,
+                                roughnessMap: groundRough,
+                                aoMap: groundAO,
+                                roughness: 0.9,
+                                metalness: 0.05
+                            });
+                            sub.material.needsUpdate = true;
+                        }
+                    });
+                }
+            });
+        }
+        scene.add(mapModel);
+
+        // Play map animations (like moving leaves/grass)
+        if (gltf.animations && gltf.animations.length > 0) {
+            mapMixer = new THREE.AnimationMixer(mapModel);
+            gltf.animations.forEach((clip) => {
+                mapMixer.clipAction(clip).play();
+            });
+            console.log("Map animations playing:", gltf.animations.length);
+        }
+
+        // Get center of map dynamically to handle shifted origins
+        const mapBox = new THREE.Box3().setFromObject(mapModel);
+        const mapCenter = new THREE.Vector3();
+        mapBox.getCenter(mapCenter);
+        mapCenterX = mapCenter.x;
+        mapCenterZ = mapCenter.z;
+        console.log("Dynamically detected map center:", mapCenterX, mapCenterZ);
+
+        // Apply custom editor map overrides (positions, rotations, scales of leaves)
+        applyMapOverrides(mapModel);
+
+        // Find safe spawn point based on map center & bounds
+        calculateSpawnPoint();
+        resetPlayerPosition();
+
+        // Snap campfire once map collisions are loaded
+        snapCampfireToGround();
+    });
+
+    // --- Procedural Stickman Avatar (local player) ---
+    playerGroup = new THREE.Group();
+    scene.add(playerGroup);
+
+    buildProceduralAvatar(playerGroup, true);
+
+    // Position first-person camera at eye level, shifted slightly forward to clear head/neck geometry
+    camera.position.set(0, CONFIG.playerHeight * 0.90, -CONFIG.playerHeight * 0.05);
+    camera.rotation.set(0, Math.PI, 0);
+    playerGroup.add(camera);
+
+    // Cache bone references
+    // bodyParts already populated by buildProceduralAvatar
+
+    // Place player group at spawn
+    resetPlayerPosition();
+    spawnRedEyes();
+
+    // Load Campfire Model at map center
+    gltfLoader.load('camp_fire.glb', (gltf) => {
+        campfireModel = gltf.scene;
+
+        // Scale campfire to fit micro scale (0.029m / 2.9cm - slightly larger than character)
+        const box = new THREE.Box3().setFromObject(campfireModel);
+        const size = new THREE.Vector3();
+        box.getSize(size);
+        const maxDim = Math.max(size.x, size.z);
+        const scaleFactor = 0.029 / maxDim;
+        campfireModel.scale.set(scaleFactor, scaleFactor, scaleFactor);
+
+        // Position at (-0.15, 0.0) clear of leaf canopy and dirt mounds
+        const x = -0.15;
+        const z = 0.0;
+        const ray = new THREE.Raycaster(new THREE.Vector3(x, 10, z), new THREE.Vector3(0, -1, 0));
+        const groundMeshes = collidableMeshes.filter(m => m.name.toLowerCase().includes('ground'));
+        const hits = ray.intersectObjects(groundMeshes, true);
+        let y = hits.length > 0 ? hits[0].point.y : 0.015;
+
+        campfireModel.position.set(x, y + 0.025, z); // Lifted by 7.5mm so stones are fully visible
+        scene.add(campfireModel);
+
+        campfireModel.traverse(child => {
+            if (child.isMesh) {
+                child.castShadow = true;
+                child.receiveShadow = true;
+            }
+        });
+
+        setupCampfireLight(x, y + 0.015, z);
+        setupCampfireQuarksParticles(x, y + 0.002, z);
+
+        // Apply custom editor campfire overrides (if moved in editor)
+        applyCampfireOverrides();
+
+        // Ensure snap is correct once all assets are loaded
+        snapCampfireToGround();
+
+        // Re-calculate spawn point and snap player beside the loaded campfire
+        calculateSpawnPoint();
+        if (playerGroup) {
+            playerGroup.position.copy(spawnPosition);
+            console.log("Teleported player beside campfire at:", playerGroup.position);
+        }
+    }, undefined, (error) => {
+        console.error("Failed to load camp_fire.glb:", error);
+    });
+
+    // 8. Event Listeners
+    window.addEventListener('resize', onWindowResize);
+    window.addEventListener('keydown', (e) => {
+        keys[e.key.toLowerCase()] = true;
+
+        // Slot Hotbar selection (1-9)
+        if (e.key >= '1' && e.key <= '9') {
+            selectSlot(parseInt(e.key));
+        }
+
+        // V key toggles fly mode
+        if (e.key.toLowerCase() === 'v') {
+            flyMode = !flyMode;
+            console.log("Fly mode toggled:", flyMode);
+            const flyStatus = document.getElementById('fly-status') || createFlyStatusUI();
+            flyStatus.innerText = flyMode ? "FLY MODE ACTIVE [WASD + Space/Shift]" : "";
+            // Clear velocities when toggling fly mode
+            verticalVelocity = 0;
+        }
+
+        // C key toggles day mode
+        if (e.key.toLowerCase() === 'c') {
+            dayMode = !dayMode;
+            updateTimeOfDay();
+        }
+
+        // Flashlight rotation debug controls (Press K/L/M to adjust live)
+        if (flashlightGLTF) {
+            if (e.key.toLowerCase() === 'k') {
+                flashlightGLTF.rotation.x += 0.087; // +5 degrees
+                printFlashlightRotation();
+            }
+            if (e.key.toLowerCase() === 'l') {
+                flashlightGLTF.rotation.y += 0.087;
+                printFlashlightRotation();
+            }
+            if (e.key.toLowerCase() === 'm') {
+                flashlightGLTF.rotation.z += 0.087;
+                printFlashlightRotation();
+            }
+        }
+    });
+    window.addEventListener('keyup', (e) => {
+        keys[e.key.toLowerCase()] = false;
+    });
+
+    function showSplitOverlays(show) {
+        const divider = document.querySelector('.split-divider');
+        const labels = document.querySelectorAll('.viewport-label');
+        if (divider) {
+            divider.classList.add('hidden');
+        }
+        labels.forEach(label => {
+            label.classList.add('hidden');
+        });
+    }
+
+    // Custom Pointer Lock Events for smooth looking without buttons held (supports mobile bypass)
+    startButton.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (isTouchDevice) {
+            startScreen.classList.add('hidden');
+            gameHud.classList.remove('hidden');
+            document.getElementById('hotbar').classList.remove('hidden');
+            document.getElementById('coords-display').classList.remove('hidden');
+            showSplitOverlays(true);
+            clock.getDelta(); // reset clock delta
+        } else {
+            const promise = canvas.requestPointerLock();
+            if (promise && promise.catch) {
+                promise.catch((err) => {
+                    console.warn("Pointer lock request blocked or deferred:", err);
+                });
+            }
+        }
+    });
+
+    document.addEventListener('pointerlockchange', () => {
+        if (document.pointerLockElement === canvas) {
+            startScreen.classList.add('hidden');
+            gameHud.classList.remove('hidden');
+            document.getElementById('hotbar').classList.remove('hidden');
+            document.getElementById('coords-display').classList.remove('hidden');
+            const stam = document.getElementById('stamina-bar-container');
+            if (stam) stam.classList.remove('hidden');
+            showSplitOverlays(true);
+            unlockAudio();
+            clock.getDelta(); // reset clock delta
+        } else {
+            // Clear all key presses to prevent stuck movement on resume
+            for (let key in keys) {
+                keys[key] = false;
+            }
+            startScreen.classList.remove('hidden');
+            gameHud.classList.add('hidden');
+            document.getElementById('hotbar').classList.add('hidden');
+            document.getElementById('coords-display').classList.add('hidden');
+            const stam = document.getElementById('stamina-bar-container');
+            if (stam) stam.classList.add('hidden');
+            showSplitOverlays(false);
+
+            const title = startScreen.querySelector('.main-title');
+            title.innerText = "Game Paused";
+            const btn = startScreen.querySelector('#start-button');
+            btn.innerText = "RESUME";
+        }
+    });
+
+    document.addEventListener('mousemove', (e) => {
+        if (document.pointerLockElement === canvas) {
+            // Increased mouse looking sensitivity (0.0035) for snappy seeker/hider responses
+            targetYaw -= e.movementX * 0.0035;
+            targetPitch -= e.movementY * 0.0035;
+            targetPitch = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, targetPitch));
+        }
+    });
+
+    resetButton.addEventListener('click', (e) => {
+        e.stopPropagation();
+        resetPlayerPosition();
+    });
+
+    // Auto-select Flashlight (slot 1) at start
+    selectSlot(1);
+
+    // Setup client-side deterministic ambient particles (fireflies, swarming bugs)
+    spawnAmbientParticles();
+
+    // Setup creepy spider cocoon egg sacs
+    spawnSpookyCocoons();
+
+    // Initialize left and right footprint textures
+    footprintLeftTexture = createFootprintTexture(true);
+    footprintRightTexture = createFootprintTexture(false);
+
+    // Initialize mobile controls overlay if on a touch device
+    initMobileControls();
+
+    // Connect to multiplayer server
+    initMultiplayer();
+
+    // Start rendering loop!
+    animate();
+}
+
+// --- Spawn logic ---
+function calculateSpawnPoint() {
+    let targetX = -0.15;
+    let targetZ = 0.0;
+    if (campfireModel) {
+        targetX = campfireModel.position.x;
+        targetZ = campfireModel.position.z;
+    }
+    // Spawn right next to the campfire (0.016m / 1.6cm, very close!)
+    spawnPosition.set(targetX + 0.016, 0.015, targetZ + 0.016);
+    console.log("Calculated dynamic spawn position beside campfire:", spawnPosition);
+}
+
+// --- Ambient Deterministic Particle Simulation ---
+// Simple seedable pseudo-random number generator (Mulberry32) for 100% synchronized layouts
+function createDeterministicRandom(seed) {
+    return function () {
+        let t = seed += 0x6D2B79F5;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    }
+}
+
+function spawnAmbientParticles() {
+    const random = createDeterministicRandom(8888); // Fixed seed for matching coords
+
+    // 1. Fireflies Setup
+    const fireflyCount = 60; // Increased count for density
+    const fireflyGeom = new THREE.SphereGeometry(0.0015, 6, 6);
+    const fireflyMat = new THREE.MeshBasicMaterial({
+        color: 0xdfff80, // Bright glowing green-yellow firefly color
+        transparent: true,
+        opacity: 0.95,
+        fog: false // Disable fog so they glow in the distance!
+    });
+
+    for (let i = 0; i < fireflyCount; i++) {
+        const mesh = new THREE.Mesh(fireflyGeom, fireflyMat);
+        scene.add(mesh);
+
+        // Base coordinates in garden (concentrated around dynamic map center)
+        const baseX = mapCenterX + (random() - 0.5) * 10.0;
+        const baseY = 0.05 + random() * 0.8;
+        const baseZ = mapCenterZ + (random() - 0.5) * 10.0;
+
+        fireflies.push({
+            mesh: mesh,
+            baseX: baseX,
+            baseY: baseY,
+            baseZ: baseZ,
+            freqX: 0.4 + random() * 0.6,
+            freqY: 0.3 + random() * 0.5,
+            freqZ: 0.4 + random() * 0.6,
+            ampX: 0.3 + random() * 0.6,
+            ampY: 0.15 + random() * 0.25,
+            ampZ: 0.3 + random() * 0.6,
+            phaseX: random() * Math.PI * 2,
+            phaseY: random() * Math.PI * 2,
+            phaseZ: random() * Math.PI * 2
+        });
+    }
+
+    // 2. Swarming Bugs Setup (3 swarm groups shifted near player spawn (0,0) for visibility)
+    const swarmCount = 3;
+    const bugsPerSwarm = 20;
+    const bugGeom = new THREE.SphereGeometry(0.0010, 4, 4); // Increased size to 1.0mm for visibility
+    const bugMat = new THREE.MeshBasicMaterial({ color: 0x111111 });
+
+    const swarmCenters = [
+        new THREE.Vector3(mapCenterX + 0.12, 0.04, mapCenterZ + 0.15),
+        new THREE.Vector3(mapCenterX - 0.22, 0.05, mapCenterZ - 0.2),
+        new THREE.Vector3(mapCenterX + 0.2, 0.06, mapCenterZ - 0.35)
+    ];
+
+    for (let s = 0; s < swarmCount; s++) {
+        const center = swarmCenters[s];
+        const bugs = [];
+
+        for (let b = 0; b < bugsPerSwarm; b++) {
+            const mesh = new THREE.Mesh(bugGeom, bugMat);
+            scene.add(mesh);
+
+            bugs.push({
+                mesh: mesh,
+                freqX: 1.8 + random() * 3.5,
+                freqY: 2.2 + random() * 3.0,
+                freqZ: 1.8 + random() * 3.5,
+                ampX: 0.04 + random() * 0.12,
+                ampY: 0.03 + random() * 0.08,
+                ampZ: 0.04 + random() * 0.12,
+                phaseX: random() * Math.PI * 2,
+                phaseY: random() * Math.PI * 2,
+                phaseZ: random() * Math.PI * 2
+            });
+        }
+
+        bugSwarms.push({
+            center: center,
+            bugs: bugs
+        });
+    }
+}
+
+function updateAmbientParticles() {
+    // Synchronize to absolute Date milliseconds so all hiders & seekers see identical coords
+    const t = Date.now() / 1000;
+
+    // 1. Update Fireflies
+    fireflies.forEach(f => {
+        f.mesh.position.x = f.baseX + Math.sin(t * f.freqX + f.phaseX) * f.ampX;
+        f.mesh.position.y = f.baseY + Math.cos(t * f.freqY + f.phaseY) * f.ampY;
+        f.mesh.position.z = f.baseZ + Math.sin(t * f.freqZ + f.phaseZ) * f.ampZ;
+    });
+
+    // 2. Update Swarming Bugs
+    bugSwarms.forEach(s => {
+        s.bugs.forEach(b => {
+            b.mesh.position.x = s.center.x + Math.sin(t * b.freqX + b.phaseX) * b.ampX;
+            b.mesh.position.y = s.center.y + Math.cos(t * b.freqY + b.phaseY) * b.ampY;
+            b.mesh.position.z = s.center.z + Math.sin(t * b.freqZ + b.phaseZ) * b.ampZ;
+        });
+    });
+}
+
+function resetPlayerPosition() {
+    if (playerGroup) {
+        playerGroup.position.copy(spawnPosition);
+        verticalVelocity = 0;
+        isGrounded = true;
+
+        // Reset look rotations to face directly at the campfire (diagonal look heading!)
+        yaw = -3 * Math.PI / 4;
+        pitch = -0.3; // look slightly downwards at the fire
+        targetYaw = yaw;
+        targetPitch = pitch;
+
+        playerGroup.rotation.y = yaw; // Apply yaw directly to body
+        camera.rotation.order = 'YXZ';
+        camera.rotation.set(pitch, 0, 0); // Keep camera local yaw at 0 to fix inverted movement!
+
+        selectSlot(1); // Select flashlight by default
+    }
+}
+
+// --- Window resizing ---
+function onWindowResize() {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+
+    renderer.setSize(window.innerWidth, window.innerHeight);
+}
+
+function updatePlayerAnimations(deltaTime) {
+    // --- Stickman Avatar Animation Update ---
+    const isMoving = keys['w'] || keys['arrowup'] || keys['s'] || keys['arrowdown'] ||
+                     keys['a'] || keys['arrowleft'] || keys['d'] || keys['arrowright'] ||
+                     (isTouchDevice && joystickDir.lengthSq() > 0);
+    prevVertVel = verticalVelocity;
+    const yawDelta = yaw - prevYaw;
+    const targetTwist = THREE.MathUtils.clamp(yawDelta * 15, -0.3, 0.3);
+    torsoTwist = L(torsoTwist, targetTwist, 0.12);
+    prevYaw = yaw;
+    if (bodyParts.torsoGroup) bodyParts.torsoGroup.rotation.y = torsoTwist;
+    if (bodyParts.headGroup) {
+        const headPitch = THREE.MathUtils.clamp(pitch * 0.6, -0.5, 0.5);
+        bodyParts.headGroup.rotation.x = L(bodyParts.headGroup.rotation.x, headPitch, 0.1);
+    }
+
+    animateCharacter(deltaTime, isMoving);
+}
 
 // --- Main Loop ---
 function animate() {
@@ -1015,7 +1275,7 @@ function animate() {
 
     // Update campfire fire/smoke particles and light flickering
     updateCampfire(deltaTime);
-    
+
     // Update quarks particle systems in animation loop
     if (quarksRenderer) {
         quarksRenderer.update(deltaTime);
@@ -1054,6 +1314,34 @@ function animate() {
     camera.rotation.order = 'YXZ'; // Order to prevent pitch/yaw distortion
     camera.rotation.z = THREE.MathUtils.lerp(camera.rotation.z, targetRoll, 6 * deltaTime);
 
+    // 2. Flashlight bobbing effect & spotlight synchronization (matches the sway and position of the mesh)
+    if (torchMesh && torchMesh.parent === camera) {
+        const isMoving = (keys['w'] || keys['s'] || keys['a'] || keys['d'] ||
+            keys['arrowup'] || keys['arrowdown'] || keys['arrowleft'] || keys['arrowright'] ||
+            (isTouchDevice && joystickDir.lengthSq() > 0));
+        const isSprinting = ((keys['w'] || keys['arrowup']) && (keys['q'] || keys['shift'])) || (isTouchDevice && mobileSprinting && joystickDir.lengthSq() > 0);
+
+        let bobX = 0;
+        let bobY = 0;
+        if (isMoving && isGrounded && !flyMode) {
+            const bobTime = clock.getElapsedTime() * (isSprinting ? 20 : 12);
+            bobX = Math.sin(bobTime) * 0.001;
+            bobY = Math.cos(bobTime * 0.5) * 0.0005;
+        }
+        torchMesh.position.set(0.013 + bobX, -0.012 + bobY, -0.018);
+
+        // Sync SpotLight and its target direction in camera coordinates to match current flashlight position
+        if (torchLight && torchTarget) {
+            const lensOffset = new THREE.Vector3(0, 0, -0.0038);
+            lensOffset.applyEuler(torchMesh.rotation);
+            torchLight.position.copy(torchMesh.position).add(lensOffset);
+
+            const targetOffset = new THREE.Vector3(0, 0, -1.0);
+            targetOffset.applyEuler(torchMesh.rotation);
+            torchTarget.position.copy(torchMesh.position).add(targetOffset);
+        }
+    }
+
     // Yaw rotates the player body horizontally
     if (playerGroup) {
         playerGroup.rotation.y = yaw;
@@ -1067,7 +1355,7 @@ function animate() {
     if (selectedSlot === 1 && torchLight) {
         // Use epoch date time so the flicker state matches perfectly on all players' screens!
         const timeSync = Date.now() / 1000;
-        
+
         // Constant micro-jitter of the cheap bulb filaments
         const jitter = (Math.sin(timeSync * 25) * Math.cos(timeSync * 14) + Math.sin(timeSync * 8)) * 0.08;
         let targetIntensity = 1.0 * (1.0 + jitter); // Base intensity 1.0 with wobbly light jitter
@@ -1086,6 +1374,9 @@ function animate() {
 
         torchLight.intensity = THREE.MathUtils.lerp(torchLight.intensity, targetIntensity, 0.35);
     }
+
+    // For split screen: local model must be visible in TPV, but we can't simply set .visible = false
+    // because it affects all cameras. We will handle visibility during render passes.
 
     // Update real-time coordinates overlay
     if (playerGroup) {
@@ -1123,55 +1414,45 @@ function animate() {
     // Interpolate remote players smooth movement
     lerpRemotePlayers(deltaTime);
 
-    // ── Avatar animation, head tracking, torso twist ──
-    const isMoving = keys['w'] || keys['arrowup'] || keys['s'] || keys['arrowdown'] ||
-                     keys['a'] || keys['arrowleft'] || keys['d'] || keys['arrowright'];
-    prevVertVel = verticalVelocity;
-    const yawDelta = yaw - prevYaw;
-    const targetTwist = THREE.MathUtils.clamp(yawDelta * 15, -0.3, 0.3);
-    torsoTwist = L(torsoTwist, targetTwist, 0.12);
-    prevYaw = yaw;
-    if (bodyParts.torsoGroup) bodyParts.torsoGroup.rotation.y = torsoTwist;
-    if (bodyParts.headGroup) {
-        const headPitch = THREE.MathUtils.clamp(pitch * 0.6, -0.5, 0.5);
-        bodyParts.headGroup.rotation.x = L(bodyParts.headGroup.rotation.x, headPitch, 0.1);
-    }
+    // Update local player animations state and mixer
+    updatePlayerAnimations(deltaTime);
 
-    animateCharacter(deltaTime, isMoving);
+    // Camera is statically positioned at eye-level on the cylinder (set during init)
+    // No bone-tracking needed
 
-    // ── First-person: hide avatar body, show only hands ──
-    const visMap = new Map();
-    if (playerModel) {
-        playerModel.traverse(child => {
-            if (child.isMesh) {
-                visMap.set(child, child.visible);
-                child.visible = false;
-            }
-        });
-        if (bodyParts.lForearm) bodyParts.lForearm.visible = true;
-        if (bodyParts.lHand) bodyParts.lHand.visible = true;
-        if (bodyParts.rForearm) bodyParts.rForearm.visible = true;
-        if (bodyParts.rHand) bodyParts.rHand.visible = true;
+    // --- Full Screen First Person Rendering ---
+    const width = window.innerWidth;
+    const height = window.innerHeight;
 
-        // First-person: make arms reach forward (override body animation)
-        if (bodyParts.lShoulderPivot) { bodyParts.lShoulderPivot.rotation.x = 0.4; bodyParts.lShoulderPivot.rotation.z = 0.15; }
-        if (bodyParts.lElbowPivot) bodyParts.lElbowPivot.rotation.x = 0.9;
-        if (bodyParts.rShoulderPivot) { bodyParts.rShoulderPivot.rotation.x = 0.4; bodyParts.rShoulderPivot.rotation.z = -0.15; }
-        if (bodyParts.rElbowPivot) bodyParts.rElbowPivot.rotation.x = 0.9;
-    }
+    renderer.setScissorTest(false);
+    renderer.setViewport(0, 0, width, height);
 
     if (camera) {
         camera.rotation.set(pitch, 0, 0);
     }
-    renderer.render(scene, camera);
 
-    // Restore visibility for 3rd-person minimap
+    // Hide main player model in FPV
     if (playerModel) {
         playerModel.traverse(child => {
-            if (child.isMesh && visMap.has(child)) {
-                child.visible = visMap.get(child);
-            }
+            if (child.isMesh) child.visible = false;
         });
+        if (bodyParts.lForearm) bodyParts.lForearm.visible = true;
+        if (bodyParts.lHand) bodyParts.lHand.visible = true;
+        if (selectedSlot === 1) {
+            if (bodyParts.rForearm) bodyParts.rForearm.visible = true;
+            if (bodyParts.rHand) bodyParts.rHand.visible = true;
+        }
+    }
+
+    // Update moon position relative to camera world position to prevent it moving when the player moves
+    if (camera && moonSprite) {
+        camera.getWorldPosition(tempCameraWorldPos);
+        moonSprite.position.copy(tempCameraWorldPos).add(moonOffset);
+    }
+
+    // Render FPV
+    if (camera) {
+        renderer.render(scene, camera);
     }
 }
 
@@ -1184,23 +1465,23 @@ function updatePlayerMovement(deltaTime) {
         if (keys['s'] || keys['arrowdown']) flyDir.z += 1; // Corrected backward direction (positive Z)
         if (keys['a'] || keys['arrowleft']) flyDir.x -= 1; // Corrected left direction (negative X)
         if (keys['d'] || keys['arrowright']) flyDir.x += 1; // Corrected right direction (positive X)
-        
+
         // Process mobile joysticks
         if (isTouchDevice && joystickDir.lengthSq() > 0) {
             flyDir.x = joystickDir.x;
             flyDir.z = joystickDir.y;
         }
-        
+
         // Up / Down
         if (keys[' '] || keys['spacebar']) playerGroup.position.y += speed * deltaTime;
         if (keys['shift']) playerGroup.position.y -= speed * deltaTime;
-        
+
         if (flyDir.lengthSq() > 0) {
             flyDir.normalize();
             flyDir.applyAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
             playerGroup.position.addScaledVector(flyDir, speed * deltaTime);
         }
-        
+
         updateAudio(deltaTime, false, false, false, panicIntensity, otherPlayers);
         return;
     }
@@ -1230,20 +1511,29 @@ function updatePlayerMovement(deltaTime) {
         const wantsToSprint = ((keys['w'] || keys['arrowup']) && (keys['q'] || keys['shift'])) || (isTouchDevice && mobileSprinting && joystickDir.lengthSq() > 0);
         localIsSprintingActive = updateAudio(deltaTime, isMoving, wantsToSprint, isGrounded, panicIntensity, otherPlayers);
         const currentSpeed = localIsSprintingActive ? CONFIG.playerSpeed * 1.5 : CONFIG.playerSpeed;
-        
+
         // Rotate local move direction into world space based on current yaw heading
         moveDir.applyAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
 
         // Move player group horizontally
         playerGroup.position.addScaledVector(moveDir, currentSpeed * deltaTime);
 
+        // Bob camera and held torch slightly (faster bobbing when sprinting!)
         const bobFrequency = localIsSprintingActive ? 20 : 12;
         const bobAmplitude = localIsSprintingActive ? 0.08 : 0.05;
         walkCycle += deltaTime * bobFrequency;
-        
+
+        if (torchMesh && torchMesh.parent === camera) {
+            const time = clock.getElapsedTime() * bobFrequency;
+            torchMesh.position.y = -0.006 + Math.abs(Math.sin(time)) * 0.0003;
+            torchMesh.position.x = 0.008 + Math.cos(time) * 0.00015;
+        }
     } else {
         walkCycle = 0;
-        
+
+        if (torchMesh && torchMesh.parent === camera) {
+            torchMesh.position.set(0.008, -0.006, -0.015);
+        }
     }
 
     // 5. Jump logic (only if grounded)
@@ -1269,7 +1559,7 @@ function updateCollisions(deltaTime) {
     if (!isGrounded) {
         verticalVelocity += CONFIG.gravity * deltaTime;
     }
-    
+
     // Update player vertical position
     playerGroup.position.y += verticalVelocity * deltaTime;
 
@@ -1291,7 +1581,7 @@ function updateCollisions(deltaTime) {
             // Obstacle is too steep/high to step up. Block XZ movement and keep previous XZ
             playerGroup.position.x = prevPosition.x;
             playerGroup.position.z = prevPosition.z;
-            
+
             // Re-raycast at reverted position to snap height properly
             const revOrigin = playerGroup.position.clone().add(new THREE.Vector3(0, CONFIG.raycastHeightOffset, 0));
             raycaster.set(revOrigin, rayDirection);
@@ -1321,7 +1611,7 @@ function updateCollisions(deltaTime) {
     } else {
         // No ground below the player (walked off cliff edge)
         isGrounded = false;
-        
+
         // Reset player if they fall into the abyss
         if (playerGroup.position.y < -40) {
             resetPlayerPosition();
@@ -1339,7 +1629,7 @@ function selectSlot(slotIndex) {
             slot.classList.remove('selected');
         }
     });
-    
+
     // Slot 1: Flashlight
     if (selectedSlot === 1) {
         if (torchLight) torchLight.visible = true;
@@ -1365,29 +1655,29 @@ function spawnRedEyes() {
         const group = new THREE.Group();
         const leftEye = new THREE.Mesh(eyeGeom, eyeMat);
         const rightEye = new THREE.Mesh(eyeGeom, eyeMat);
-        
+
         // Space eyes slightly apart (3mm)
         leftEye.position.x = -0.0015;
         rightEye.position.x = 0.0015;
-        
+
         group.add(leftEye);
         group.add(rightEye);
-        
+
         // Place randomly in the forest, but at least 1.5 units away from spawn to prevent immediate start-screen panic
         let x, z;
         do {
             x = mapCenterX + (Math.random() - 0.5) * 8.0;
             z = mapCenterZ + (Math.random() - 0.5) * 8.0;
-        } while (Math.sqrt((x - mapCenterX)*(x - mapCenterX) + (z - mapCenterZ)*(z - mapCenterZ)) < 1.5);
-        
+        } while (Math.sqrt((x - mapCenterX) * (x - mapCenterX) + (z - mapCenterZ) * (z - mapCenterZ)) < 1.5);
+
         // Snap Y to ground
         const ray = new THREE.Raycaster(new THREE.Vector3(x, 10, z), new THREE.Vector3(0, -1, 0));
         const hits = ray.intersectObjects(collidableMeshes, true);
         let y = hits.length > 0 ? hits[0].point.y + 0.015 : 0.015;
-        
+
         group.position.set(x, y, z);
         scene.add(group);
-        
+
         redEyesList.push({
             group: group,
             baseY: y,
@@ -1441,9 +1731,9 @@ function spawnSpookyCocoons() {
 
 function updateRedEyes(deltaTime) {
     const time = clock.getElapsedTime();
-    
+
     let minDistance = 999.0;
-    
+
     redEyesList.forEach(eye => {
         // Glow breathing rate
         eye.fadeTimer += deltaTime * 2;
@@ -1453,24 +1743,24 @@ function updateRedEyes(deltaTime) {
                 child.material.color.setRGB(glow, 0, 0);
             }
         });
-        
+
         // Look at player
         eye.group.lookAt(playerGroup.position);
-        
+
         // Check distance to player for panic triggers
         if (playerGroup) {
             const dist = eye.group.position.distanceTo(playerGroup.position);
             if (dist < minDistance) {
                 minDistance = dist;
             }
-            
+
             // If flashlight shines on them, fade out/teleport away (scare factor!)
             if (selectedSlot === 1) {
                 // Raycast vector from player to eye
                 const toEyeDir = new THREE.Vector3().subVectors(eye.group.position, playerGroup.position).normalize();
                 const lookDir = new THREE.Vector3();
                 camera.getWorldDirection(lookDir);
-                
+
                 const angle = lookDir.angleTo(toEyeDir);
                 if (angle < Math.PI / 8 && dist < 0.8) {
                     // Flashlight is pointing directly at them! Quickly teleport them somewhere else in the dark (at least 1.5m away from player)!
@@ -1478,13 +1768,13 @@ function updateRedEyes(deltaTime) {
                     do {
                         x = (Math.random() - 0.5) * 8.0;
                         z = (Math.random() - 0.5) * 8.0;
-                    } while (Math.sqrt(x*x + z*z) < 1.5);
-                    
+                    } while (Math.sqrt(x * x + z * z) < 1.5);
+
                     // Snap Y
                     const ray = new THREE.Raycaster(new THREE.Vector3(x, 10, z), new THREE.Vector3(0, -1, 0));
                     const hits = ray.intersectObjects(collidableMeshes, true);
                     let y = hits.length > 0 ? hits[0].point.y + 0.015 : 0.015;
-                    
+
                     eye.group.position.set(x, y, z);
                     eye.baseY = y;
                     eye.fadeTimer = Math.random() * Math.PI;
@@ -1515,7 +1805,7 @@ function updateMinimap() {
     const originalAmbientIntensity = ambientLight.intensity;
     const originalTorch = torchLight.intensity;
     const originalCampfire = campfireLight ? campfireLight.intensity : 0;
-    
+
     // Ensure sunLight exists for the minimap daylight shadow pass
     if (!sunLight) {
         sunLight = new THREE.DirectionalLight(0xffffff, 1.4);
@@ -1553,7 +1843,7 @@ function updateMinimap() {
     if (campfireLight) campfireLight.intensity = originalCampfire;
     sunLight.visible = originalSunVisible;
     sunLight.intensity = originalSunIntensity;
-    
+
     // Re-enable spooky elements
     redEyesList.forEach(eye => {
         if (eye.group) eye.group.visible = true;
@@ -1563,7 +1853,7 @@ function updateMinimap() {
     const ctx = minimapHudCtx;
     const w = minimapHudCanvas.width;
     const h = minimapHudCanvas.height;
-    
+
     ctx.clearRect(0, 0, w, h);
 
     // Draw circular border ring on HUD canvas for clean Minecraft radar look
@@ -1579,16 +1869,16 @@ function updateMinimap() {
         const cz = campfireModel.position.z;
         const dx = cx - px;
         const dz = cz - pz;
-        
+
         const viewSize = 0.35; // Matches camera width/height
         const viewHalfSize = viewSize / 2;
-        
+
         // If campfire is within the Orthographic camera viewport bounds, draw it directly!
         if (Math.abs(dx) < viewHalfSize && Math.abs(dz) < viewHalfSize) {
             // Map relative coordinates (-viewHalfSize to viewHalfSize) to Canvas pixels (0 to w)
             const mapX = w / 2 + (dx / viewSize) * w;
             const mapY = h / 2 + (dz / viewSize) * h;
-            
+
             ctx.shadowColor = '#ff6b00';
             ctx.shadowBlur = 6;
             ctx.fillStyle = '#ff6b00';
@@ -1596,7 +1886,7 @@ function updateMinimap() {
             ctx.arc(mapX, mapY, 4.5, 0, Math.PI * 2);
             ctx.fill();
             ctx.shadowBlur = 0; // Reset shadow
-            
+
             // Outer glowing ring
             ctx.strokeStyle = 'rgba(255, 107, 0, 0.5)';
             ctx.lineWidth = 1;
@@ -1609,7 +1899,7 @@ function updateMinimap() {
             const edgeR = w / 2 - 8;
             const edgeX = w / 2 + Math.cos(angle) * edgeR;
             const edgeY = h / 2 + Math.sin(angle) * edgeR;
-            
+
             ctx.fillStyle = '#ff6b00';
             ctx.beginPath();
             ctx.arc(edgeX, edgeY, 3.5, 0, Math.PI * 2);
@@ -1645,7 +1935,7 @@ function updateMinimap() {
     ctx.closePath();
     ctx.fill();
     ctx.stroke();
-    
+
     ctx.restore();
 }
 
@@ -1684,11 +1974,11 @@ function updateCampfire(deltaTime) {
 
 function snapCampfireToGround() {
     if (!campfireModel || collidableMeshes.length === 0 || !mapModel) return;
-    
+
     // Snaps to its current X and Z coordinate
     const x = campfireModel.position.x;
     const z = campfireModel.position.z;
-    
+
     const ray = new THREE.Raycaster(new THREE.Vector3(x, 10, z), new THREE.Vector3(0, -1, 0));
     // Filter out floating leaf meshes so the campfire snaps exactly to the ground floor!
     const groundMeshes = collidableMeshes.filter(m => m.name.toLowerCase().includes('ground'));
@@ -1698,7 +1988,7 @@ function snapCampfireToGround() {
         campfireModel.position.set(x, y + 0.025, z); // Lifted by 7.5mm so stones are fully visible
         if (campfireLight) campfireLight.position.set(x, y + 0.045, z); // Positioned above the campfire logs pointing down
         campfireBaseY = y + 0.017; // Particle spawn height - starts inside the woods!
-        
+
         // Reposition quarks particle emitters immediately to ground level
         if (quarksFireSystem) quarksFireSystem.emitter.position.set(x, campfireBaseY + 0.001, z);
         if (quarksSparksSystem) quarksSparksSystem.emitter.position.set(x, campfireBaseY + 0.002, z);
@@ -1737,14 +2027,14 @@ function applyCampfireOverrides() {
             const over = overrides['camp_fire'];
             if (over.position) campfireModel.position.set(over.position.x, over.position.y, over.position.z);
             if (over.rotation) campfireModel.rotation.set(over.rotation.x, over.rotation.y, over.rotation.z);
-            
+
             // Adjust light and base positions to match the overridden position
             const x = campfireModel.position.x;
             const y = campfireModel.position.y;
             const z = campfireModel.position.z;
             if (campfireLight) campfireLight.position.set(x, y + 0.020, z); // Positioned above the campfire logs pointing down
             campfireBaseY = y - 0.008; // Particle base inside the wood pile
-            
+
             // Reposition quarks particle emitters immediately to match
             if (quarksFireSystem) quarksFireSystem.emitter.position.set(x, campfireBaseY + 0.001, z);
             if (quarksSparksSystem) quarksSparksSystem.emitter.position.set(x, campfireBaseY + 0.002, z);
@@ -1764,14 +2054,14 @@ function updateTimeOfDay() {
         scene.background = new THREE.Color(0xb0d5f8);
         scene.fog.color = new THREE.Color(0xb0d5f8);
         scene.fog.density = 0.015; // thin out fog
-        
+
         scene.traverse(child => {
             if (child.isAmbientLight) {
                 child.color.setHex(0xffffff);
                 child.intensity = 1.0;
             }
         });
-        
+
         if (!sunLight) {
             sunLight = new THREE.DirectionalLight(0xffffff, 1.4);
             sunLight.position.set(20, 40, 20);
@@ -1784,8 +2074,8 @@ function updateTimeOfDay() {
             sunLight.visible = true;
         }
     } else {
-        scene.background = new THREE.Color(0x000000);
-        scene.fog.color = new THREE.Color(0x000000);
+        scene.background = new THREE.Color(0x060c14);
+        scene.fog.color = new THREE.Color(0x060c14);
         scene.fog.density = CONFIG.fogDensity;
 
         scene.traverse(child => {
@@ -1848,16 +2138,16 @@ function createFireParticleTexture() {
     canvas.width = 64;
     canvas.height = 64;
     const ctx = canvas.getContext('2d');
-    
+
     ctx.clearRect(0, 0, 64, 64);
-    
+
     // Draw a teardrop flame shape
     ctx.beginPath();
     ctx.moveTo(32, 54); // Bottom center
     ctx.bezierCurveTo(12, 45, 18, 15, 32, 10); // Left curve to top point
     ctx.bezierCurveTo(46, 15, 52, 45, 32, 54); // Right curve back to bottom
     ctx.closePath();
-    
+
     // Fill with a vertical linear gradient (white-hot base, yellow body, red tip)
     const gradient = ctx.createLinearGradient(32, 54, 32, 10);
     gradient.addColorStop(0.0, 'rgba(255, 255, 255, 1.0)');     // White hot bottom
@@ -1865,10 +2155,10 @@ function createFireParticleTexture() {
     gradient.addColorStop(0.6, 'rgba(255, 80, 0, 0.6)');        // Fiery orange-red
     gradient.addColorStop(0.9, 'rgba(180, 20, 0, 0.15)');       // Fading red tip
     gradient.addColorStop(1.0, 'rgba(0, 0, 0, 0)');
-    
+
     ctx.fillStyle = gradient;
     ctx.fill();
-    
+
     const texture = new THREE.CanvasTexture(canvas);
     return texture;
 }
@@ -1878,17 +2168,17 @@ function createSmokeParticleTexture() {
     canvas.width = 64;
     canvas.height = 64;
     const ctx = canvas.getContext('2d');
-    
+
     // Soft radial gradient for smoke puffs
     const gradient = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
     gradient.addColorStop(0, 'rgba(220, 220, 220, 0.45)');
     gradient.addColorStop(0.3, 'rgba(160, 160, 160, 0.22)');
     gradient.addColorStop(0.7, 'rgba(100, 100, 100, 0.06)');
     gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
-    
+
     ctx.fillStyle = gradient;
     ctx.fillRect(0, 0, 64, 64);
-    
+
     const texture = new THREE.CanvasTexture(canvas);
     return texture;
 }
@@ -1899,15 +2189,15 @@ function setupCampfireQuarksParticles(x, y, z) {
         quarksRenderer.renderOrder = 999; // Force particles to render on top of transparent grass/leaves
         scene.add(quarksRenderer);
     }
-    
+
     const textureLoader = new THREE.TextureLoader();
-    
+
     // Load the realistic fire sprite sheet (5x5 grid)
     const fireTexture = textureLoader.load('downloaded_assets/firespritesheet/fireSheet5x5.png');
     // Load Kenney's high quality particle pack textures
     const sparkTexture = textureLoader.load('downloaded_assets/kenney_particle-pack/PNG (Transparent)/spark_02.png');
     const smokeTexture = textureLoader.load('downloaded_assets/kenney_particle-pack/PNG (Transparent)/smoke_04.png');
-    
+
     // 1. Core Flame System (Additive) - Large lush flame animation loop
     quarksFireSystem = new QUARKS.ParticleSystem({
         duration: 2.0,
@@ -1915,7 +2205,7 @@ function setupCampfireQuarksParticles(x, y, z) {
         uTileCount: 5, // 5 columns in fireSheet5x5
         vTileCount: 5, // 5 rows in fireSheet5x5
         renderMode: QUARKS.RenderMode.BillBoard,
-        shape: new QUARKS.ConeEmitter({ 
+        shape: new QUARKS.ConeEmitter({
             radius: 0.0035, // Broaden emission area
             angle: 0.08
         }),
@@ -1955,7 +2245,7 @@ function setupCampfireQuarksParticles(x, y, z) {
         duration: 2.0,
         looping: true,
         renderMode: QUARKS.RenderMode.BillBoard,
-        shape: new QUARKS.ConeEmitter({ 
+        shape: new QUARKS.ConeEmitter({
             radius: 0.001,
             angle: 0.28
         }),
@@ -1991,7 +2281,7 @@ function setupCampfireQuarksParticles(x, y, z) {
         duration: 3.0,
         looping: true,
         renderMode: QUARKS.RenderMode.BillBoard,
-        shape: new QUARKS.ConeEmitter({ 
+        shape: new QUARKS.ConeEmitter({
             radius: 0.0015,
             angle: 0.18
         }),
@@ -2062,7 +2352,7 @@ function createProceduralFlashlight() {
     gltfLoader.load('realistic_flashlight__low_poly_game_ready.glb', (gltf) => {
         const gltfMesh = gltf.scene;
         flashlightGLTF = gltfMesh; // Save reference for key rotations debugger
-        
+
         // Compute bounding box size to scale it to fit hand (0.0055m / 5.5mm length)
         const box = new THREE.Box3().setFromObject(gltfMesh);
         const size = new THREE.Vector3();
@@ -2070,11 +2360,11 @@ function createProceduralFlashlight() {
         const maxDim = Math.max(size.x, size.y, size.z);
         const scaleFactor = 0.0055 / maxDim;
         gltfMesh.scale.set(scaleFactor, scaleFactor, scaleFactor);
-        
+
         // Center on hand pivot and point forward (Y axis rotated to point to negative Z)
         gltfMesh.position.set(0, 0, -0.001);
         gltfMesh.rotation.set(0, -Math.PI / 2, 0); // Reset X rotation, only use Y horizontal turn!
-        
+
         gltfMesh.traverse(child => {
             if (child.isMesh) {
                 // Swap to an unlit MeshBasicMaterial so it shows its normal colors/textures and is completely unaffected by darkness or light!
@@ -2093,15 +2383,15 @@ function createProceduralFlashlight() {
                 child.receiveShadow = false;
             }
         });
-        
+
         // Attach to the main torch group
         torchMeshGroup.add(gltfMesh);
-        
+
         // Hide the dark cylinder fallback meshes
         bodyMesh.visible = false;
         headMesh.visible = false;
         lensMesh.visible = false;
-        
+
         console.log("3D Flashlight asset loaded and overlaid successfully.");
     }, undefined, (error) => {
         console.warn("Failed to load 3D flashlight asset, using dark cylinder fallback.", error);
@@ -2122,23 +2412,23 @@ function createFootprintTexture(isLeft) {
     canvas.width = 32;
     canvas.height = 64;
     const ctx = canvas.getContext('2d');
-    
+
     // Transparent background
     ctx.clearRect(0, 0, 32, 64);
-    
+
     // Draw outer shadow / dark soil impression
     ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
-    
+
     // Front sole (ribbed oval)
     ctx.beginPath();
     ctx.ellipse(16, 22, 10, 16, 0, 0, Math.PI * 2);
     ctx.fill();
-    
+
     // Heel (smaller ribbed oval)
     ctx.beginPath();
     ctx.ellipse(16, 48, 7, 10, 0, 0, Math.PI * 2);
     ctx.fill();
-    
+
     // Asymmetric inner arch cutout (for left foot, arch is on the right; for right foot, arch is on the left)
     ctx.globalCompositeOperation = 'destination-out';
     ctx.fillStyle = 'rgba(0, 0, 0, 1.0)';
@@ -2146,7 +2436,7 @@ function createFootprintTexture(isLeft) {
     const archX = isLeft ? 26 : 6;
     ctx.arc(archX, 35, 7.5, 0, Math.PI * 2);
     ctx.fill();
-    
+
     // Moon lander boot ridges (horizontal destination-out cutouts)
     ctx.strokeStyle = 'rgba(0, 0, 0, 1.0)';
     ctx.lineWidth = 2.5;
@@ -2156,10 +2446,10 @@ function createFootprintTexture(isLeft) {
         ctx.lineTo(29, y);
         ctx.stroke();
     }
-    
+
     // Reset composite operation
     ctx.globalCompositeOperation = 'source-over';
-    
+
     const texture = new THREE.CanvasTexture(canvas);
     return texture;
 }
@@ -2228,7 +2518,7 @@ function updateFootprints() {
     for (let i = activeFootprints.length - 1; i >= 0; i--) {
         const fp = activeFootprints[i];
         const elapsed = (now - fp.spawnTime) / 1000;
-        
+
         if (elapsed > 30) {
             scene.remove(fp.mesh);
             fp.mesh.geometry.dispose();
@@ -2244,16 +2534,18 @@ function updateFootprints() {
 
 // --- Multiplayer Client Logic ---
 function initMultiplayer() {
+    const urlParams = new URLSearchParams(window.location.search);
+    const lobbyCode = urlParams.get('lobby') || 'global';
     const socketProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const socketUrl = `${socketProtocol}//${window.location.host}`;
-    
-    console.log("Connecting to multiplayer server at:", socketUrl);
+    const socketUrl = `${socketProtocol}//${window.location.host}?lobby=${lobbyCode}`;
+
+    console.log(`Connecting to multiplayer server lobby [${lobbyCode}] at:`, socketUrl);
     ws = new WebSocket(socketUrl);
-    
+
     ws.onopen = () => {
         console.log("Connected to multiplayer server!");
     };
-    
+
     ws.onmessage = (event) => {
         try {
             const data = JSON.parse(event.data);
@@ -2294,41 +2586,8 @@ function createRemotePlayer(p) {
     const group = new THREE.Group();
     let spotlight = null;
 
-    // Procedural white avatar for remote player
-    const avatar = buildProceduralAvatar(group, false);
-    const bp = avatar.bodyParts;
-
-    // Attach torch to right hand
-    if (bp.rWristPivot) {
-        const handPivot = new THREE.Group();
-        handPivot.position.set(0, 0, 0);
-        bp.rWristPivot.add(handPivot);
-
-        const torchGroup = new THREE.Group();
-        const bodyGeom = new THREE.CylinderGeometry(0.0004, 0.0004, 0.005, 12);
-        const bodyMat = new THREE.MeshStandardMaterial({ color: 0x222f3e, metalness: 0.8, roughness: 0.2 });
-        const bodyMesh = new THREE.Mesh(bodyGeom, bodyMat);
-        bodyMesh.rotation.x = Math.PI / 2;
-        torchGroup.add(bodyMesh);
-
-        const headGeom = new THREE.CylinderGeometry(0.0007, 0.0004, 0.0015, 12);
-        const headMat = new THREE.MeshStandardMaterial({ color: 0x57606f, metalness: 0.9, roughness: 0.1 });
-        const headMesh = new THREE.Mesh(headGeom, headMat);
-        headMesh.position.set(0, 0, -0.003);
-        headMesh.rotation.x = Math.PI / 2;
-        torchGroup.add(headMesh);
-
-        const lensGeom = new THREE.CylinderGeometry(0.0006, 0.0006, 0.0001, 12);
-        const lensMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
-        const lensMesh = new THREE.Mesh(lensGeom, lensMat);
-        lensMesh.position.set(0, 0, -0.0038);
-        lensMesh.rotation.x = Math.PI / 2;
-        torchGroup.add(lensMesh);
-
-        torchGroup.position.set(0.001, -0.002, -0.008);
-        torchGroup.rotation.set(0.2, 0, 0);
-        handPivot.add(torchGroup);
-    }
+    // Build procedural stickman for remote player
+    const { bodyParts: remoteBP } = buildProceduralAvatar(group, false);
 
     // Spotlight for remote player's flashlight beam
     spotlight = new THREE.SpotLight(0xffffff, 4.0, 1.2, 0.38, 0.5, 1.0);
@@ -2336,10 +2595,10 @@ function createRemotePlayer(p) {
     spotlight.shadow.mapSize.width = 256;
     spotlight.shadow.mapSize.height = 256;
     spotlight.shadow.bias = -0.005;
-    spotlight.position.set(0, CONFIG.playerHeight * 0.95, 0);
-    
+    spotlight.position.set(0, CONFIG.playerHeight * 0.95, -bodyRadius);
+
     const targetHelper = new THREE.Object3D();
-    targetHelper.position.set(0, CONFIG.playerHeight * 0.95, -1.0);
+    targetHelper.position.set(0, CONFIG.playerHeight * 0.95, -bodyRadius - 1.0);
     group.add(spotlight);
     group.add(targetHelper);
     spotlight.target = targetHelper;
@@ -2361,7 +2620,7 @@ function createRemotePlayer(p) {
     const tagGeom = new THREE.PlaneGeometry(0.03, 0.0085);
     const tagMat = new THREE.MeshBasicMaterial({ map: tagTexture, transparent: true, side: THREE.DoubleSide, depthTest: false, depthWrite: false });
     const tagMesh = new THREE.Mesh(tagGeom, tagMat);
-    
+
     // Add nametag directly to the scene to avoid parent rotation distortion
     scene.add(tagMesh);
 
@@ -2384,7 +2643,7 @@ function createRemotePlayer(p) {
 
     otherPlayers.set(p.id, {
         mesh: group,
-        bodyParts: bp,
+        bodyParts: remoteBP,
         spotlight: spotlight,
         tagMesh: tagMesh,
         targetPosition: new THREE.Vector3(startX, startY, startZ),
@@ -2393,9 +2652,8 @@ function createRemotePlayer(p) {
         currentPitch: startPitch,
         isFlashlightOn: isFlashOn,
         walkTime: 0,
-        prevYaw: startYaw,
-        animState: 'idle',
-        turnLean: 0
+        turnLean: 0,
+        prevYaw: startYaw
     });
 }
 
@@ -2416,6 +2674,11 @@ function updateRemotePlayer(p) {
     player.isFlashlightOn = p.isFlashlightOn !== undefined ? !!p.isFlashlightOn : player.isFlashlightOn;
     player.isSprinting = p.isSprinting !== undefined ? !!p.isSprinting : player.isSprinting;
     player.spotlight.visible = player.isFlashlightOn;
+
+    // Handle Animation Sync (stickman remote)
+    if (p.animState) {
+        player.remoteAnimState = p.animState;
+    }
 
     // Show remote player once they start sending position updates
     player.mesh.visible = true;
@@ -2452,8 +2715,16 @@ function removeRemotePlayer(id) {
 
 function lerpRemotePlayers(deltaTime) {
     otherPlayers.forEach(p => {
+        // Animate remote stickman avatar
+        animateRemoteAvatar(p, deltaTime);
+
+        // Smoothly interpolate position and yaw rotation (reduces lag jitter!)
         p.mesh.position.lerp(p.targetPosition, 12 * deltaTime);
+
+        // Rotate yaw smoothly
         p.mesh.rotation.y = THREE.MathUtils.lerp(p.mesh.rotation.y, p.targetYaw, 12 * deltaTime);
+
+        // Update remote spotlight pitch direction
         p.currentPitch = THREE.MathUtils.lerp(p.currentPitch || 0, p.targetPitch || 0, 12 * deltaTime);
 
         if (p.spotlight && p.spotlight.target) {
@@ -2465,54 +2736,11 @@ function lerpRemotePlayers(deltaTime) {
             );
         }
 
+        // Update nametag position to follow player group and face the camera directly!
         if (p.tagMesh) {
             p.tagMesh.position.set(p.mesh.position.x, p.mesh.position.y + 0.095, p.mesh.position.z);
-            if (camera) p.tagMesh.quaternion.copy(camera.quaternion);
-        }
-
-        // Animate remote avatar
-        const bp = p.bodyParts;
-        if (!bp || !bp.lHipPivot) return;
-        const isMoving = p.mesh.position.distanceTo(p.targetPosition) > 0.001;
-        const yawDelta = p.targetYaw - p.prevYaw;
-        const twist = THREE.MathUtils.clamp(yawDelta * 15, -0.3, 0.3);
-        p.turnLean = L(p.turnLean || 0, -yawDelta * 18, 0.18);
-        p.prevYaw = p.targetYaw;
-
-        if (bp.torsoGroup) {
-            bp.torsoGroup.rotation.y = twist;
-            bp.torsoGroup.rotation.z = p.turnLean;
-        }
-
-        p.walkTime += deltaTime * (isMoving ? 7.5 : 1.4);
-        const t = p.walkTime;
-
-        if (isMoving) {
-            const bob = Math.abs(Math.sin(t)) * 0.03;
-            if (bp.torsoGroup) bp.torsoGroup.position.y = L(bp.torsoGroup.position.y, 1.10 - bob * 0.5, 0.15);
-            const lHip = Math.sin(t) * 0.7;
-            const rHip = Math.sin(t + Math.PI) * 0.7;
-            const lKnee = Math.max(0, -Math.sin(t)) * 0.9;
-            const rKnee = Math.max(0, -Math.sin(t + Math.PI)) * 0.9;
-            bp.lHipPivot.rotation.x = L(bp.lHipPivot.rotation.x, lHip, 0.25);
-            bp.lKneePivot.rotation.x = L(bp.lKneePivot.rotation.x, lKnee, 0.25);
-            bp.lAnklePivot.rotation.x = L(bp.lAnklePivot.rotation.x, Math.sin(t) * 0.25, 0.25);
-            bp.rHipPivot.rotation.x = L(bp.rHipPivot.rotation.x, rHip, 0.25);
-            bp.rKneePivot.rotation.x = L(bp.rKneePivot.rotation.x, rKnee, 0.25);
-            bp.rAnklePivot.rotation.x = L(bp.rAnklePivot.rotation.x, Math.sin(t + Math.PI) * 0.25, 0.25);
-            if (bp.lShoulderPivot) {
-                bp.lShoulderPivot.rotation.x = L(bp.lShoulderPivot.rotation.x, -Math.sin(t) * 0.5, 0.25);
-                bp.rShoulderPivot.rotation.x = L(bp.rShoulderPivot.rotation.x, -Math.sin(t + Math.PI) * 0.5, 0.25);
-            }
-        } else {
-            if (bp.torsoGroup) bp.torsoGroup.position.y = L(bp.torsoGroup.position.y, 1.10, 0.08);
-            bp.lHipPivot.rotation.x = L(bp.lHipPivot.rotation.x, 0, 0.08);
-            bp.rHipPivot.rotation.x = L(bp.rHipPivot.rotation.x, 0, 0.08);
-            bp.lKneePivot.rotation.x = L(bp.lKneePivot.rotation.x, 0, 0.08);
-            bp.rKneePivot.rotation.x = L(bp.rKneePivot.rotation.x, 0, 0.08);
-            if (bp.lShoulderPivot) {
-                bp.lShoulderPivot.rotation.x = L(bp.lShoulderPivot.rotation.x, 0.05, 0.06);
-                bp.rShoulderPivot.rotation.x = L(bp.rShoulderPivot.rotation.x, 0.05, 0.06);
+            if (camera) {
+                p.tagMesh.quaternion.copy(camera.quaternion);
             }
         }
     });
@@ -2524,6 +2752,14 @@ function sendPlayerUpdate() {
     if (now - lastUpdateTime < 30) return; // Throttle to 30fps update rate
     lastUpdateTime = now;
 
+    // Determine current animation state for syncing
+    let animState = 'idle';
+    if (!isGrounded) {
+        animState = 'jump';
+    } else if (keys['w'] || keys['arrowup'] || (isTouchDevice && joystickDir.lengthSq() > 0)) {
+        animState = localIsSprintingActive ? 'sprint' : 'walk';
+    }
+
     ws.send(JSON.stringify({
         type: 'update',
         x: playerGroup.position.x,
@@ -2533,7 +2769,8 @@ function sendPlayerUpdate() {
         pitch: pitch,
         activeSlot: selectedSlot,
         isSprinting: localIsSprintingActive,
-        isFlashlightOn: selectedSlot === 1
+        isFlashlightOn: selectedSlot === 1,
+        animState: animState
     }));
 }
 
@@ -2564,12 +2801,12 @@ function initMobileControls() {
         if (!joystickActive) return;
         e.preventDefault();
         const touch = e.touches[0];
-        
+
         // Displacement vector from center of joystick
         const touchPos = new THREE.Vector2(touch.clientX, touch.clientY);
         const diff = touchPos.clone().sub(joystickStart);
         const dist = diff.length();
-        
+
         const maxDist = 45; // Maximum travel radius in pixels
         if (dist > maxDist) {
             diff.normalize().multiplyScalar(maxDist);

@@ -11,6 +11,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "express": "^5.2.1",
     "fbx2gltf": "^0.9.7-p1",
     "ws": "^8.21.0"
   }

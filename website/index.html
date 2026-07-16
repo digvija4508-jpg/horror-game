@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Avatar Showcase - Clean Room</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #222;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        canvas {
+            display: block;
+        }
+        #ui-overlay {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: white;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 8px;
+            pointer-events: none;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        .controls-hint {
+            font-size: 14px;
+            margin-top: 10px;
+            color: #ccc;
+        }
+        .view-label {
+            position: absolute;
+            color: rgba(255, 255, 255, 0.6);
+            font-size: 12px;
+            font-weight: bold;
+            text-transform: uppercase;
+            pointer-events: none;
+            padding: 10px;
+            text-shadow: 1px 1px 2px black;
+        }
+        #label-fpv { top: 10px; left: 10px; }
+        #label-tpv { top: 10px; right: 10px; }
+        #label-spv { bottom: 10px; left: 10px; }
+        #label-bev { bottom: 10px; right: 10px; }
+    </style>
+</head>
+<body>
+    <div id="ui-overlay">
+        <h2 style="margin: 0 0 10px 0;">Avatar Showcase</h2>
+        <div>Status: <span id="anim-state">Idle</span></div>
+        <div class="controls-hint">
+            <b>WASD</b>: Move Avatar<br>
+            <b>Shift</b>: Sprint<br>
+        </div>
+    </div>
+
+    <div id="label-fpv" class="view-label">First-Person View</div>
+    <div id="label-tpv" class="view-label">Third-Person View</div>
+    <div id="label-spv" class="view-label">Second-Person (Frontal)</div>
+    <div id="label-bev" class="view-label">Bird's Eye View</div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+    <script type="module" src="showcase.js"></script>
+</body>
+</html>

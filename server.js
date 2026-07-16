@@ -4,7 +4,7 @@ const path = require('path');
 const { WebSocketServer } = require('ws');
 const os = require('os');
 
-const PORT = 8000;
+const PORT = 3000;
 
 // Content types helper
 const CONTENT_TYPES = {
@@ -24,15 +24,155 @@ const CONTENT_TYPES = {
     '.wav': 'audio/wav'
 };
 
+// Global Lobbies registry (Lobby Code -> Lobby Details)
+let lobbies = new Map(); // Map(lobbyCode -> { clients: Map(ws -> playerData), hostId: number, gameTimeLeft: number, timerInterval: setInterval })
+
+// Local profiles database (in-memory fallback)
+let localProfiles = new Map(); // username -> secretToken
+
+// Load environment variables manually from .env if it exists
+try {
+    const envPath = path.join(__dirname, '.env');
+    if (fs.existsSync(envPath)) {
+        const envContent = fs.readFileSync(envPath, 'utf-8');
+        envContent.split(/\r?\n/).forEach(line => {
+            const trimmed = line.trim();
+            if (trimmed && !trimmed.startsWith('#')) {
+                const parts = trimmed.split('=');
+                if (parts.length >= 2) {
+                    const key = parts[0].trim();
+                    const value = parts.slice(1).join('=').trim().replace(/^['"]|['"]$/g, '');
+                    process.env[key] = value;
+                }
+            }
+        });
+        console.log("Loaded .env configuration file.");
+    }
+} catch (e) {
+    console.error("Failed to load .env file manually:", e);
+}
+
 // HTTP Static File Server
 const server = http.createServer((req, res) => {
     // Strip query parameters (e.g. ?v=82 cache busters) from the file path lookup
-    const urlPath = req.url.split('?')[0];
-    // Decodes URL components (e.g. %20 space)
-    let filePath = path.join(__dirname, decodeURIComponent(urlPath === '/' ? '/index.html' : urlPath));
+    const urlParts = req.url.split('?');
+    const urlPath = urlParts[0];
+    const decodedPath = decodeURIComponent(urlPath);
     
-    // Safety check: prevent directory traversal
-    if (!filePath.startsWith(__dirname)) {
+    // Parse query parameters
+    const urlParams = new URL(req.url, 'http://localhost').searchParams;
+    
+    // API Endpoint: Check if room name is unique
+    if (decodedPath === '/api/check-room') {
+        const name = urlParams.get('name');
+        const exists = lobbies.has(name);
+        res.writeHead(200, { 
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+        });
+        res.end(JSON.stringify({ exists }));
+        return;
+    }
+
+    // API Endpoint: Get Supabase Config
+    if (decodedPath === '/api/supabase-config') {
+        res.writeHead(200, {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+        });
+        res.end(JSON.stringify({
+            url: process.env.SUPABASE_URL || null,
+            key: process.env.SUPABASE_KEY || null
+        }));
+        return;
+    }
+
+    // API Endpoint: Check if callsign username is currently active/online
+    if (decodedPath === '/api/check-username') {
+        const name = urlParams.get('name');
+        let active = false;
+        
+        // Scan all lobbies for anyone using this name
+        for (const lobby of lobbies.values()) {
+            for (const client of lobby.clients.values()) {
+                if (client.name && client.name.toLowerCase() === name.toLowerCase()) {
+                    active = true;
+                    break;
+                }
+            }
+            if (active) break;
+        }
+        
+        res.writeHead(200, {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+        });
+        res.end(JSON.stringify({ active }));
+        return;
+    }
+
+    // API Endpoint: Local profile authentication (fallback database)
+    if (decodedPath === '/api/local-profile') {
+        const name = urlParams.get('name');
+        const token = urlParams.get('token');
+        let status = 'success';
+        let returnToken = token;
+
+        if (localProfiles.has(name)) {
+            const savedToken = localProfiles.get(name);
+            if (savedToken !== token) {
+                status = 'invalid';
+            }
+        } else {
+            // Register new local profile
+            if (!token) {
+                returnToken = 'local_' + Math.random().toString(36).substring(2, 15);
+            }
+            localProfiles.set(name, returnToken);
+        }
+
+        res.writeHead(200, {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+        });
+        res.end(JSON.stringify({ status, token: returnToken }));
+        return;
+    }
+
+    // API Endpoint: Increment profile game count
+    if (decodedPath === '/api/increment-games') {
+        const name = urlParams.get('name');
+        console.log(`Survivor "${name}" stats updated (+1 Game Played).`);
+        res.writeHead(200, {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+        });
+        res.end(JSON.stringify({ success: true }));
+        return;
+    }
+
+    let filePath;
+    if (decodedPath.startsWith('/horror game/') || decodedPath.startsWith('/horror game')) {
+        // Serve from horror game folder
+        const subPath = decodedPath.replace('/horror game', '');
+        filePath = path.join(__dirname, subPath === '/' || subPath === '' ? '/index.html' : subPath);
+    } else {
+        // Serve from landing page folder
+        const subPath = decodedPath === '/' ? '/index.html' : decodedPath;
+        filePath = path.join(__dirname, '..', 'game-landing-page', subPath);
+    }
+
+    // Rewrite clean URLs: If file doesn't exist and has no extension, check if appending .html matches a file
+    if (!fs.existsSync(filePath) && path.extname(filePath) === '') {
+        const htmlPath = filePath + '.html';
+        if (fs.existsSync(htmlPath)) {
+            filePath = htmlPath;
+        }
+    }
+
+    // Safety check: prevent directory traversal outside of workspace root
+    const projectRoot = path.join(__dirname, '..');
+    if (!filePath.startsWith(projectRoot)) {
         res.writeHead(403);
         res.end('Forbidden');
         return;
@@ -51,7 +191,7 @@ const server = http.createServer((req, res) => {
                 res.end(`Server Error: ${err.code}`);
             }
         } else {
-            res.writeHead(200, { 
+            res.writeHead(200, {
                 'Content-Type': contentType,
                 'Cache-Control': 'no-cache, no-store, must-revalidate',
                 'Pragma': 'no-cache',
@@ -64,77 +204,184 @@ const server = http.createServer((req, res) => {
 
 // WebSocket Multiplayer Server
 const wss = new WebSocketServer({ server });
-let clients = new Map();
 let nextPlayerId = 1;
 
-// Global Synchronized Round Timer (5 minutes / 300 seconds)
-let gameTimeLeft = 300;
-setInterval(() => {
-    if (gameTimeLeft > 0) {
-        gameTimeLeft--;
-        broadcast({
-            type: 'timer',
-            timeLeft: gameTimeLeft
-        });
-    } else {
-        gameTimeLeft = 300; // Reset countdown
-        broadcast({
-            type: 'timer',
-            timeLeft: gameTimeLeft
-        });
+function getOrCreateLobby(lobbyCode) {
+    if (!lobbies.has(lobbyCode)) {
+        const lobby = {
+            clients: new Map(),
+            hostId: null,
+            originalHostName: null, // Track the callsign of the room creator
+            gameTimeLeft: 300,
+            timerInterval: null
+        };
+        
+        // Start a synchronized round timer for this specific lobby
+        lobby.timerInterval = setInterval(() => {
+            if (lobby.gameTimeLeft > 0) {
+                lobby.gameTimeLeft--;
+            } else {
+                lobby.gameTimeLeft = 300; // Reset countdown
+            }
+            broadcastToLobby(lobbyCode, {
+                type: 'timer',
+                timeLeft: lobby.gameTimeLeft
+            }, null, 'game');
+        }, 1000);
+        
+        lobbies.set(lobbyCode, lobby);
+        console.log(`Lobby [${lobbyCode}] created`);
     }
-}, 1000);
+    return lobbies.get(lobbyCode);
+}
 
-wss.on('connection', (ws) => {
+function deleteLobbyIfEmpty(lobbyCode) {
+    const lobby = lobbies.get(lobbyCode);
+    if (lobby && lobby.clients.size === 0) {
+        clearInterval(lobby.timerInterval);
+        lobbies.delete(lobbyCode);
+        console.log(`Lobby [${lobbyCode}] deleted (empty)`);
+    }
+}
+
+// Optional filter by client mode ('lobby' or 'game')
+function broadcastToLobby(lobbyCode, data, excludeWs = null, modeFilter = null) {
+    const lobby = lobbies.get(lobbyCode);
+    if (!lobby) return;
+    const messageStr = JSON.stringify(data);
+    for (const [clientWs, clientData] of lobby.clients.entries()) {
+        if (clientWs !== excludeWs && clientWs.readyState === 1) {
+            if (modeFilter && clientData.mode !== modeFilter) continue;
+            clientWs.send(messageStr);
+        }
+    }
+}
+
+function sendLobbyUpdate(lobbyCode) {
+    const lobby = lobbies.get(lobbyCode);
+    if (!lobby) return;
+    
+    const playersList = Array.from(lobby.clients.entries())
+        .filter(([ws, data]) => data.mode === 'lobby')
+        .map(([ws, data]) => ({
+            id: data.id,
+            name: data.name,
+            isReady: data.isReady || false,
+            isHost: data.id === lobby.hostId
+        }));
+        
+    broadcastToLobby(lobbyCode, {
+        type: 'lobby_update',
+        hostId: lobby.hostId,
+        players: playersList
+    }, null, 'lobby');
+}
+
+wss.on('connection', (ws, req) => {
+    // Parse lobby and mode query parameters
+    const urlParams = new URL(req.url, 'http://localhost').searchParams;
+    const lobbyCode = urlParams.get('lobby') || 'global';
+    const mode = urlParams.get('mode') || 'game'; // 'lobby' (waiting room) or 'game' (3D simulation)
+    const name = urlParams.get('name') || `Survivor_${nextPlayerId}`;
+    
+    const lobby = getOrCreateLobby(lobbyCode);
     const id = nextPlayerId++;
-    clients.set(ws, { id });
+    
+    // Store player data relative to the lobby
+    lobby.clients.set(ws, { id, name, mode, isReady: false, lobbyCode });
 
-    console.log(`Player ${id} connected`);
-
-    // 1. Send initialization data to the new player
-    const existingPlayers = [];
-    for (const [clientWs, clientData] of clients.entries()) {
-        if (clientWs !== ws) {
-            existingPlayers.push({
-                id: clientData.id,
-                x: clientData.x || 0,
-                y: clientData.y || 0,
-                z: clientData.z || 0,
-                yaw: clientData.yaw || 0,
-                pitch: clientData.pitch || 0,
-                activeSlot: clientData.activeSlot || 1,
-                isSprinting: clientData.isSprinting || false,
-                isFlashlightOn: clientData.isFlashlightOn || false
-            });
+    // Host Assignment & Succession logic
+    const lobbyPlayers = Array.from(lobby.clients.values()).filter(c => c.mode === 'lobby');
+    if (lobbyPlayers.length === 1) {
+        // This is the first lobby member! They are the creator / host
+        lobby.hostId = id;
+        lobby.originalHostName = name;
+        console.log(`Assigned original host: Player ${id} ("${name}") for Lobby [${lobbyCode}]`);
+    } else {
+        // Check if the original host has rejoined the lobby
+        if (name === lobby.originalHostName) {
+            lobby.hostId = id;
+            console.log(`Original host "${name}" rejoined. Restored ownership to Player ${id} in Lobby [${lobbyCode}].`);
         }
     }
 
-    ws.send(JSON.stringify({
-        type: 'init',
-        id: id,
-        players: existingPlayers,
-        timeLeft: gameTimeLeft
-    }));
+    console.log(`Player ${id} ("${name}") connected to Lobby [${lobbyCode}] in mode: ${mode}`);
 
-    // 2. Broadcast join event to all other players with initial positions
-    broadcast({
-        type: 'join',
-        id: id,
-        x: 0,
-        y: 0.025,
-        z: 0,
-        yaw: 0,
-        pitch: 0,
-        isFlashlightOn: false
-    }, ws);
+    if (mode === 'lobby') {
+        // Send initial state and then broadcast update
+        ws.send(JSON.stringify({
+            type: 'init_lobby',
+            id: id,
+            hostId: lobby.hostId
+        }));
+        sendLobbyUpdate(lobbyCode);
+    } else {
+        // Mode is 'game'
+        const existingPlayers = [];
+        for (const [clientWs, clientData] of lobby.clients.entries()) {
+            if (clientWs !== ws && clientData.mode === 'game') {
+                existingPlayers.push({
+                    id: clientData.id,
+                    x: clientData.x || 0,
+                    y: clientData.y || 0,
+                    z: clientData.z || 0,
+                    yaw: clientData.yaw || 0,
+                    pitch: clientData.pitch || 0,
+                    activeSlot: clientData.activeSlot || 1,
+                    isSprinting: clientData.isSprinting || false,
+                    isFlashlightOn: clientData.isFlashlightOn || false
+                });
+            }
+        }
 
-    // 3. Handle messages from client
+        ws.send(JSON.stringify({
+            type: 'init',
+            id: id,
+            players: existingPlayers,
+            timeLeft: lobby.gameTimeLeft
+        }));
+
+        // Broadcast join event to other players in the same lobby
+        broadcastToLobby(lobbyCode, {
+            type: 'join',
+            id: id,
+            x: 0,
+            y: 0.025,
+            z: 0,
+            yaw: 0,
+            pitch: 0,
+            isFlashlightOn: false
+        }, ws, 'game');
+    }
+
+    // Handle messages
     ws.on('message', (message) => {
         try {
             const data = JSON.parse(message);
-            if (data.type === 'update') {
-                const playerData = clients.get(ws);
-                if (playerData) {
+            const playerData = lobby.clients.get(ws);
+            if (!playerData) return;
+
+            if (playerData.mode === 'lobby') {
+                if (data.type === 'ready_toggle') {
+                    playerData.isReady = !playerData.isReady;
+                    sendLobbyUpdate(lobbyCode);
+                } else if (data.type === 'chat') {
+                    broadcastToLobby(lobbyCode, {
+                        type: 'chat',
+                        name: playerData.name,
+                        text: data.text
+                    }, null, 'lobby');
+                } else if (data.type === 'launch_game') {
+                    if (playerData.id === lobby.hostId) {
+                        broadcastToLobby(lobbyCode, {
+                            type: 'launch_game',
+                            lobbyCode: lobbyCode
+                        }, null, 'lobby');
+                    }
+                }
+            } else {
+                // Game mode updates
+                if (data.type === 'update') {
                     playerData.x = data.x;
                     playerData.y = data.y;
                     playerData.z = data.z;
@@ -143,9 +390,9 @@ wss.on('connection', (ws) => {
                     playerData.activeSlot = data.activeSlot;
                     playerData.isSprinting = data.isSprinting;
                     playerData.isFlashlightOn = data.isFlashlightOn;
+                    playerData.animState = data.animState;
 
-                    // Broadcast movement updates to everyone else
-                    broadcast({
+                    broadcastToLobby(lobbyCode, {
                         type: 'update',
                         id: id,
                         x: data.x,
@@ -155,8 +402,9 @@ wss.on('connection', (ws) => {
                         pitch: data.pitch,
                         activeSlot: data.activeSlot,
                         isSprinting: data.isSprinting,
-                        isFlashlightOn: data.isFlashlightOn
-                    }, ws);
+                        isFlashlightOn: data.isFlashlightOn,
+                        animState: data.animState
+                    }, ws, 'game');
                 }
             }
         } catch (e) {
@@ -164,26 +412,33 @@ wss.on('connection', (ws) => {
         }
     });
 
-    // 4. Handle disconnection
+    // Handle disconnection
     ws.on('close', () => {
-        console.log(`Player ${id} disconnected`);
-        clients.delete(ws);
-        broadcast({
-            type: 'leave',
-            id: id
-        });
+        console.log(`Player ${id} disconnected from Lobby [${lobbyCode}]`);
+        lobby.clients.delete(ws);
+        
+        if (mode === 'lobby') {
+            // Re-assign host if the host disconnected
+            if (lobby.hostId === id) {
+                const remainingLobbyClients = Array.from(lobby.clients.entries()).filter(([cWs, cData]) => cData.mode === 'lobby');
+                if (remainingLobbyClients.length > 0) {
+                    lobby.hostId = remainingLobbyClients[0][1].id;
+                    console.log(`Temporary host assigned for Lobby [${lobbyCode}] is Player ${lobby.hostId} ("${remainingLobbyClients[0][1].name}")`);
+                } else {
+                    lobby.hostId = null;
+                }
+            }
+            sendLobbyUpdate(lobbyCode);
+        } else {
+            broadcastToLobby(lobbyCode, {
+                type: 'leave',
+                id: id
+            }, null, 'game');
+        }
+        
+        deleteLobbyIfEmpty(lobbyCode);
     });
 });
-
-// Broadcast helper
-function broadcast(data, excludeWs = null) {
-    const messageStr = JSON.stringify(data);
-    for (const clientWs of clients.keys()) {
-        if (clientWs !== excludeWs && clientWs.readyState === 1) {
-            clientWs.send(messageStr);
-        }
-    }
-}
 
 // Get network interfaces to print IP addresses
 function getLocalIpAddresses() {
@@ -203,7 +458,7 @@ server.listen(PORT, '0.0.0.0', () => {
     console.log(`===================================================`);
     console.log(`MULTIPLAYER HORROR GAME RUNNING ON PORT ${PORT}`);
     console.log(`Local Access: http://localhost:${PORT}`);
-    
+
     const ips = getLocalIpAddresses();
     if (ips.length > 0) {
         console.log(`\nJoin from other devices on the same Wi-Fi:`);

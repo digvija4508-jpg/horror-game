@@ -77,6 +77,19 @@ export function attachRemoteAudio(playerGroup) {
     console.log("Procedural positional audio node attached to remote player.");
 }
 
+// --- 3B. Initialize Local Footstep Audio ---
+export function initLocalFootstepAudio(playerMesh) {
+    if (!audioListener || !playerMesh) return;
+
+    const positionalAudio = new THREE.PositionalAudio(audioListener);
+    positionalAudio.setRefDistance(0.3);
+    positionalAudio.setMaxDistance(2.5);
+    positionalAudio.setDistanceModel('linear');
+
+    playerMesh.add(positionalAudio);
+    console.log("Local procedural footstep audio node attached.");
+}
+
 // --- Procedural Footstep Audio Synthesizer (Dirt Ground Simulator) ---
 function triggerStepNodes(ctx, destination, volume) {
     // Dynamic random variations per step to prevent identical repetition
@@ -241,7 +254,7 @@ export function updateAudio(deltaTime, isMoving, wantsToSprint, isGrounded, pani
     }
 
     // B. Sound Playback & Ducking Logic
-    const isHeartbeatActive = playerEnergy < 0.25;
+    const isHeartbeatActive = playerEnergy < 0.20;
     const isGhostNearActive = panicIntensity > 0.02;
     const isFinalStageActive = gameTimeLeft <= 60 && gameTimeLeft > 0;
 
